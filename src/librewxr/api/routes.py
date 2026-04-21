@@ -5,7 +5,7 @@ import logging
 import time
 import psutil
 
-from fastapi import APIRouter, HTTPException, Path, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Response
 
 from librewxr.api.models import (
     RadarData,
@@ -118,6 +118,7 @@ async def radar_tile(
     color: int = Path(ge=0, le=255),
     smooth_snow: str = Path(pattern=r"^\d+_\d+$"),
     ext: str = Path(pattern=r"^(png|webp)$"),
+    arrows: str = Query(default=""),
 ) -> Response:
     """Rain Viewer-compatible tile endpoint."""
     logger.debug("Tile request: z=%d x=%d y=%d color=%d smooth_snow=%s ext=%s", z, x, y, color, smooth_snow, ext)
@@ -134,7 +135,13 @@ async def radar_tile(
 
     tile_size = 512 if size >= 512 else 256
 
-    cache_key = (timestamp, z, x, y, tile_size, color, smooth, snow, ext)
+    arrow_style = ""
+    if arrows in ("1", "true", "light"):
+        arrow_style = "light"
+    elif arrows == "dark":
+        arrow_style = "dark"
+
+    cache_key = (timestamp, z, x, y, tile_size, color, smooth, snow, ext, arrow_style)
     cached = tile_cache.get(cache_key)
     if cached is not None:
         return Response(
@@ -152,6 +159,14 @@ async def radar_tile(
     if frame is None:
         raise HTTPException(status_code=404, detail="Frame not found")
 
+    flow_regions = None
+    ecmwf_flow = None
+    if arrow_style:
+        if nowcast_store is not None:
+            flow_regions = await nowcast_store.get_flows() or None
+        if ecmwf_grid is not None and ecmwf_grid.flow is not None:
+            ecmwf_flow = ecmwf_grid.flow
+
     tile_bytes = render_tile(
         frame_regions=frame.regions,
         z=z, x=x, y=y,
@@ -164,6 +179,9 @@ async def radar_tile(
         enabled_regions=enabled_regions,
         frame_timestamp=timestamp,
         nowcast_blend=nowcast_blend,
+        flow_regions=flow_regions,
+        ecmwf_flow=ecmwf_flow,
+        arrow_style=arrow_style,
     )
 
     tile_cache.put(cache_key, tile_bytes)

@@ -67,6 +67,7 @@ class NowcastStore:
 
     def __init__(self):
         self._frames: dict[int, NowcastFrame] = {}
+        self._flows: dict[str, np.ndarray] = {}
         self._lock = asyncio.Lock()
 
     async def replace_all(
@@ -96,8 +97,19 @@ class NowcastStore:
         async with self._lock:
             return sorted(self._frames.keys())
 
+    async def replace_flows(self, flows: dict[str, np.ndarray]) -> None:
+        """Update the latest optical flow vectors."""
+        async with self._lock:
+            self._flows = dict(flows)
+
+    async def get_flows(self) -> dict[str, np.ndarray]:
+        """Return the latest per-region optical flow vectors."""
+        async with self._lock:
+            return dict(self._flows)
+
     def clear(self) -> None:
         self._frames.clear()
+        self._flows.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -138,14 +150,16 @@ class NowcastGenerator:
         interval = settings.fetch_interval
 
         # Run CPU-heavy extrapolation in a thread
-        nowcast_frames = await asyncio.to_thread(
+        nowcast_frames, flows = await asyncio.to_thread(
             self._generate_sync,
             prev_frame.regions, latest_frame.regions,
             latest_ts, n_steps, interval,
+            settings.nowcast_blend_mode,
         )
 
         # Swap into the store and invalidate old tile cache entries
         old_timestamps = await self._nowcast_store.replace_all(nowcast_frames)
+        await self._nowcast_store.replace_flows(flows)
         if self._cache is not None:
             for ts in old_timestamps:
                 self._cache.invalidate_timestamp(ts)
@@ -165,6 +179,7 @@ class NowcastGenerator:
         latest_ts: int,
         n_steps: int,
         interval: int,
+        blend_mode: str = "blended",
     ) -> list[NowcastFrame]:
         """Synchronous nowcast generation (runs in a thread)."""
         t0 = time.monotonic()
@@ -179,21 +194,26 @@ class NowcastGenerator:
             flows[region_name] = _compute_flow(data0, data1)
 
         if not flows:
-            return []
+            return [], {}
 
         # Generate extrapolated frames for each step
         frames: list[NowcastFrame] = []
         for step in range(1, n_steps + 1):
             nowcast_ts = latest_ts + step * interval
-            # Blend curve: radar-dominant near-term, fading to 30% radar
-            # at 60 min.  Beyond 60 min, radar extrapolation is too
-            # inaccurate so we fall back to pure IFS.
+            # Blend weight controls how much radar extrapolation vs IFS
+            # forecast is used.  1.0 = pure radar, 0.0 = pure IFS.
+            # Beyond 60 min, always fall back to pure IFS regardless of
+            # mode because radar extrapolation becomes too inaccurate.
             max_blend_steps = max(1, 3600 // interval)  # 6 at 10-min cadence
-            if step <= max_blend_steps:
+            if step > max_blend_steps:
+                blend_weight = 0.0
+            elif blend_mode == "radar":
+                blend_weight = 1.0
+            elif blend_mode == "ifs":
+                blend_weight = 0.0
+            else:  # "blended" (default)
                 t = step / max_blend_steps
                 blend_weight = 0.30 + 0.70 * (1.0 - t) ** 1.1
-            else:
-                blend_weight = 0.0
 
             regions: dict[str, np.ndarray] = {}
             for region_name, flow in flows.items():
@@ -211,7 +231,7 @@ class NowcastGenerator:
             "Nowcast generation: %d frames × %d regions (%.1fs)",
             len(frames), len(flows), elapsed,
         )
-        return frames
+        return frames, flows
 
 
 # ---------------------------------------------------------------------------
@@ -270,20 +290,10 @@ def _extrapolate_forward(
         borderMode=cv2.BORDER_CONSTANT, borderValue=0,
     )
 
-    # Intensity preservation: rescale so the mean of non-zero pixels
-    # matches the source frame, preventing artificial decay from
-    # bilinear interpolation smoothing.
-    src_mask = frame > 0
-    warp_mask = warped > 0
-    if src_mask.any() and warp_mask.any():
-        src_mean = frame[src_mask].astype(np.float32).mean()
-        warp_mean = warped[warp_mask].astype(np.float32).mean()
-        if warp_mean > 0:
-            scale = src_mean / warp_mean
-            # Clamp scale to avoid amplifying noise (allow up to 30% boost)
-            scale = min(scale, 1.3)
-            if scale > 1.0:
-                corrected = warped.astype(np.float32) * scale
-                warped = np.clip(corrected + 0.5, 0, 255).astype(np.uint8)
+    # Note: intensity preservation (rescaling warped pixels to match
+    # source mean) was removed because bilinear interpolation only
+    # loses ~1-2% per step, while new low-value boundary pixels from
+    # spreading inflated the correction ratio and caused a visible
+    # intensity jump on the first forecast frame.
 
     return warped

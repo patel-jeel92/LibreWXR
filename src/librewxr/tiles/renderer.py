@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import io
+import math
 
 import cv2
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 from librewxr.colors.schemes import colorize
 from librewxr.config import settings
@@ -34,6 +35,9 @@ def render_tile(
     enabled_regions: list[str] | None = None,
     frame_timestamp: int | None = None,
     nowcast_blend: float | None = None,
+    flow_regions: dict[str, np.ndarray] | None = None,
+    ecmwf_flow: np.ndarray | None = None,
+    arrow_style: str = "light",
 ) -> bytes:
     """Render a single map tile from composite radar data.
 
@@ -67,6 +71,8 @@ def render_tile(
             return _render_ecmwf_only_tile(
                 ecmwf_grid, z, x, y, tile_size,
                 color_scheme, smooth, snow, fmt, frame_timestamp,
+                ecmwf_flow=ecmwf_flow,
+                arrow_style=arrow_style if flow_regions or ecmwf_flow is not None else "",
             )
         return _transparent_tile(tile_size, fmt)
 
@@ -140,6 +146,15 @@ def render_tile(
 
         if pad > 0:
             img = img.crop((pad, pad, pad + tile_size, pad + tile_size))
+
+    if flow_regions or ecmwf_flow is not None:
+        img = _draw_motion_arrows(
+            img, flow_regions, frame_regions, regions_with_data,
+            z, x, y, tile_size, arrow_style,
+            ecmwf_flow=ecmwf_flow,
+            ecmwf_grid=ecmwf_grid,
+            frame_timestamp=frame_timestamp,
+        )
 
     return _encode_image(img, fmt)
 
@@ -383,6 +398,8 @@ def _render_ecmwf_only_tile(
     snow: bool,
     fmt: str,
     frame_timestamp: int | None = None,
+    ecmwf_flow: np.ndarray | None = None,
+    arrow_style: str = "",
 ) -> bytes:
     """Render a tile entirely from ECMWF data (no radar regions overlap)."""
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
@@ -406,6 +423,16 @@ def _render_ecmwf_only_tile(
         rgba = colorize(values, color_scheme, snow=False)
 
     img = Image.fromarray(rgba, "RGBA")
+
+    if ecmwf_flow is not None and arrow_style:
+        img = _draw_motion_arrows(
+            img, None, {}, [],
+            z, x, y, tile_size, arrow_style,
+            ecmwf_flow=ecmwf_flow,
+            ecmwf_grid=ecmwf_grid,
+            frame_timestamp=frame_timestamp,
+        )
+
     return _encode_image(img, fmt)
 
 
@@ -442,6 +469,223 @@ def _bilinear_sample(
     result = np.where(any_zero, nearest, interp)
 
     return np.clip(result + 0.5, 0, 255).astype(np.uint8)
+
+
+def _draw_motion_arrows(
+    img: Image.Image,
+    flow_regions: dict[str, np.ndarray] | None,
+    frame_regions: dict[str, np.ndarray],
+    regions: list[RegionDef],
+    z: int, x: int, y: int,
+    tile_size: int,
+    style: str = "light",
+    ecmwf_flow: np.ndarray | None = None,
+    ecmwf_grid=None,
+    frame_timestamp: int | None = None,
+) -> Image.Image:
+    """Draw precipitation motion vector arrows on the tile.
+
+    Overlays semi-transparent arrows on areas with active precipitation,
+    showing storm movement direction and relative speed. Arrows are
+    derived from the optical flow field computed between the two most
+    recent radar frames, with ECMWF IFS flow as a global fallback
+    outside radar coverage.
+
+    ``style`` selects the arrow colour: ``"light"`` for white arrows
+    (best on dark maps) or ``"dark"`` for dark arrows (best on light maps).
+    """
+    # Regions that have both frame data and flow data
+    if flow_regions:
+        valid_regions = [
+            r for r in regions
+            if r.name in flow_regions and r.name in frame_regions
+        ]
+    else:
+        valid_regions = []
+
+    has_ecmwf = (
+        ecmwf_flow is not None
+        and ecmwf_grid is not None
+        and ecmwf_grid.data is not None
+    )
+
+    if not valid_regions and not has_ecmwf:
+        return img
+
+    # Precompute pixel-index arrays for each valid radar region
+    region_info = []
+    for r in valid_regions:
+        row_f, col_f = region_pixel_indices_fractional(r, z, x, y, tile_size)
+        row_i, col_i = region_pixel_indices(r, z, x, y, tile_size)
+        region_info.append((r, row_f, col_f, row_i, col_i))
+
+    # Precompute lat/lon grid for ECMWF fallback (only if needed)
+    ecmwf_latlons = None
+    ecmwf_precip = None
+    radar_coverage = None
+    if has_ecmwf:
+        from librewxr.data.ecmwf_grid import GRID_HEIGHT, GRID_WIDTH, NORTH, PIXEL_SIZE, WEST
+        ecmwf_latlons = tile_pixel_latlons(z, x, y, tile_size)
+        ecmwf_precip = ecmwf_grid.sample(
+            ecmwf_latlons[0], ecmwf_latlons[1], frame_timestamp,
+        )
+        # Precompute radar coverage so we can distinguish "clear sky under
+        # radar" from "outside radar coverage" when deciding whether to
+        # fall through to ECMWF arrows.
+        if region_info:
+            lat_grid, lon_grid = ecmwf_latlons
+            radar_coverage = np.zeros(lat_grid.shape, dtype=bool)
+            for r in regions:
+                radar_coverage |= sample_coverage(r.name, lat_grid, lon_grid)
+
+    # Noise floor: arrows should only appear where the rendered tile
+    # actually shows precipitation (same threshold used for display).
+    noise_threshold = 0
+    if settings.noise_floor_dbz > -32:
+        noise_threshold = int((settings.noise_floor_dbz + 32) * 2)
+
+    spacing = 32 if tile_size <= 256 else 48
+    line_w = 2 if tile_size <= 256 else 3
+    arrow_color = (40, 40, 40, 180) if style == "dark" else (255, 255, 255, 160)
+    speed_scale = 4.0
+    min_len = 5.0
+    max_len = spacing * 0.75
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    for ty in range(spacing // 2, tile_size, spacing):
+        for tx in range(spacing // 2, tile_size, spacing):
+            arrow_dx = arrow_dy = 0.0
+            found = False
+
+            # Try radar regions in priority order (finest resolution first)
+            for r, row_f, col_f, row_i, col_i in region_info:
+                ri, ci = int(row_i[ty, tx]), int(col_i[ty, tx])
+                if ri < 0 or ci < 0:
+                    continue  # Outside this region, try next
+
+                frame = frame_regions[r.name]
+                if frame[ri, ci] < noise_threshold:
+                    # Only claim the pixel if it's within actual radar
+                    # coverage (clear sky).  Pixels inside the region's
+                    # bounding box but outside station coverage should
+                    # fall through to ECMWF.
+                    if radar_coverage is None or radar_coverage[ty, tx]:
+                        found = True
+                        break
+                    continue
+
+                flow = flow_regions[r.name]
+                rf = min(max(int(row_f[ty, tx]), 0), flow.shape[0] - 1)
+                cf = min(max(int(col_f[ty, tx]), 0), flow.shape[1] - 1)
+
+                fx = float(flow[rf, cf, 0])
+                fy = float(flow[rf, cf, 1])
+
+                # Local scale: region pixels per tile pixel (finite diff)
+                tx1 = min(tx + 1, tile_size - 1)
+                ty1 = min(ty + 1, tile_size - 1)
+                tx0 = max(tx - 1, 0)
+                ty0 = max(ty - 1, 0)
+                dcol = (col_f[ty, tx1] - col_f[ty, tx0]) / (tx1 - tx0)
+                drow = (row_f[ty1, tx] - row_f[ty0, tx]) / (ty1 - ty0)
+
+                if abs(dcol) < 1e-8 or abs(drow) < 1e-8:
+                    found = True
+                    break
+
+                raw_dx = fx / dcol
+                raw_dy = fy / drow
+                raw_len = math.hypot(raw_dx, raw_dy)
+
+                if raw_len < 0.5:
+                    found = True
+                    break  # Effectively stationary
+
+                target_len = min(max(raw_len * speed_scale, min_len), max_len)
+                arrow_dx = raw_dx / raw_len * target_len
+                arrow_dy = raw_dy / raw_len * target_len
+                found = True
+                break  # Used this region for this grid point
+
+            # ECMWF fallback: only if no radar region claimed this pixel
+            if not found and has_ecmwf:
+                if ecmwf_precip[ty, tx] < noise_threshold:
+                    continue  # Below noise floor — not visible on tile
+
+                lat = float(ecmwf_latlons[0][ty, tx])
+                lon = float(ecmwf_latlons[1][ty, tx])
+
+                # Convert lat/lon to ECMWF grid indices
+                er = (NORTH - lat) / PIXEL_SIZE
+                ec = (lon - WEST) / PIXEL_SIZE
+                eri = min(max(int(er), 0), GRID_HEIGHT - 1)
+                eci = min(max(int(ec), 0), GRID_WIDTH - 1)
+
+                fx = float(ecmwf_flow[eri, eci, 0])
+                fy = float(ecmwf_flow[eri, eci, 1])
+
+                # Local scale: ECMWF grid pixels per tile pixel
+                # Use lat/lon difference to compute the Jacobian
+                tx1 = min(tx + 1, tile_size - 1)
+                ty1 = min(ty + 1, tile_size - 1)
+                tx0 = max(tx - 1, 0)
+                ty0 = max(ty - 1, 0)
+
+                dlat_dy = (ecmwf_latlons[0][ty1, tx] - ecmwf_latlons[0][ty0, tx]) / (ty1 - ty0)
+                dlon_dx = (ecmwf_latlons[1][ty, tx1] - ecmwf_latlons[1][ty, tx0]) / (tx1 - tx0)
+
+                # Convert degrees to ECMWF grid pixels
+                drow_dy = -dlat_dy / PIXEL_SIZE  # negative: lat decreases as row increases
+                dcol_dx = dlon_dx / PIXEL_SIZE
+
+                if abs(dcol_dx) < 1e-8 or abs(drow_dy) < 1e-8:
+                    continue
+
+                raw_dx = fx / dcol_dx
+                raw_dy = fy / drow_dy
+                raw_len = math.hypot(raw_dx, raw_dy)
+
+                if raw_len < 0.5:
+                    continue
+
+                target_len = min(max(raw_len * speed_scale, min_len), max_len)
+                arrow_dx = raw_dx / raw_len * target_len
+                arrow_dy = raw_dy / raw_len * target_len
+                found = True
+
+            if not found or (arrow_dx == 0.0 and arrow_dy == 0.0):
+                continue
+
+            # Arrow biased toward the tip (60% forward)
+            x0 = tx - arrow_dx * 0.4
+            y0 = ty - arrow_dy * 0.4
+            x1 = tx + arrow_dx * 0.6
+            y1 = ty + arrow_dy * 0.6
+
+            # Shaft
+            draw.line(
+                [(x0, y0), (x1, y1)],
+                fill=arrow_color, width=line_w,
+            )
+
+            # Arrowhead
+            angle = math.atan2(arrow_dy, arrow_dx)
+            head_len = max(4.0, min(8.0, math.hypot(arrow_dx, arrow_dy) * 0.35))
+            ha = 0.45  # half-angle
+            draw.polygon(
+                [
+                    (x1, y1),
+                    (x1 - head_len * math.cos(angle - ha),
+                     y1 - head_len * math.sin(angle - ha)),
+                    (x1 - head_len * math.cos(angle + ha),
+                     y1 - head_len * math.sin(angle + ha)),
+                ],
+                fill=arrow_color,
+            )
+
+    return Image.alpha_composite(img, overlay)
 
 
 def _transparent_tile(tile_size: int, fmt: str) -> bytes:

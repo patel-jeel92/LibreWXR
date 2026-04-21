@@ -55,6 +55,25 @@
         .buttons button:hover {
             background: #f5f5f5;
         }
+        .buttons select {
+            height: 36px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #fff;
+            font-size: 13px;
+            color: #555;
+            cursor: pointer;
+            padding: 0 8px;
+        }
+        .buttons label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            color: #555;
+            cursor: pointer;
+            white-space: nowrap;
+        }
         #mapid {
             position: absolute;
             top: 50px;
@@ -73,6 +92,12 @@
     <span class="title">Weather Radar (LibreWXR)</span>
     <span id="timestamp">Loading...</span>
     <div class="buttons">
+        <select id="arrowsToggle" onchange="toggleArrows()">
+            <option value="">Arrows: Off</option>
+            <option value="light">Arrows: Light</option>
+            <option value="dark">Arrows: Dark</option>
+        </select>
+        <label id="hideAnimLabel" style="display:none"><input type="checkbox" id="hideAnimArrows" onchange="toggleHideAnimArrows()"> Hide during playback</label>
         <button onclick="stop(); showFrame(animationPosition - 1);">&#x2039;</button>
         <button id="playBtn" onclick="playStop();">&#x25B6;</button>
         <button onclick="stop(); showFrame(animationPosition + 1);">&#x203A;</button>
@@ -102,6 +127,8 @@ var animationTimer = false;
 var currentLayer = null;
 var isLoading = false;
 var layerCache = {};
+var arrowsMode = '';
+var hideAnimArrows = false;
 
 // === MAP SETUP ===
 var map = L.map('mapid', { maxZoom: 12 }).setView([39.8283, -98.5795], 5);
@@ -127,7 +154,9 @@ function formatTime(timestamp) {
 
 // === LAYER MANAGEMENT ===
 function createRadarLayer(frame) {
-    return new L.TileLayer(apiData.host + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/7/1_1.png', {
+    var useArrows = arrowsMode && !(hideAnimArrows && animationTimer);
+    var arrowsParam = useArrows ? '?arrows=' + arrowsMode : '';
+    return new L.TileLayer(apiData.host + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/7/1_1.png' + arrowsParam, {
         tileSize: 256,
         opacity: 0.001,
         maxZoom: 12
@@ -163,8 +192,33 @@ function play() {
 
 function playStop() {
     if (!stop()) {
+        if (hideAnimArrows && arrowsMode) clearAllLayers();
         play();
+    } else if (hideAnimArrows && arrowsMode) {
+        clearAllLayers();
+        showFrame(animationPosition);
     }
+}
+
+function clearAllLayers() {
+    isLoading = false;
+    for (var pos in layerCache) {
+        map.removeLayer(layerCache[pos]);
+        delete layerCache[pos];
+    }
+    currentLayer = null;
+}
+
+function toggleArrows() {
+    arrowsMode = document.getElementById('arrowsToggle').value;
+    document.getElementById('hideAnimLabel').style.display = arrowsMode ? '' : 'none';
+    stop();
+    clearAllLayers();
+    showFrame(animationPosition);
+}
+
+function toggleHideAnimArrows() {
+    hideAnimArrows = document.getElementById('hideAnimArrows').checked;
 }
 
 // === DISPLAY ===

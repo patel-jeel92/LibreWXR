@@ -58,6 +58,7 @@ class ECMWFGrid:
         self._sorted_timestamps: list[int] = []
         self._reference_time: str | None = None
         self._fs: fsspec.AbstractFileSystem | None = None
+        self._flow: np.ndarray | None = None  # Global optical flow field
 
     @property
     def data(self) -> np.ndarray | None:
@@ -73,6 +74,11 @@ class ECMWFGrid:
     @property
     def timestep_count(self) -> int:
         return len(self._timesteps)
+
+    @property
+    def flow(self) -> np.ndarray | None:
+        """The latest global optical flow field, or None if not available."""
+        return self._flow
 
     def _get_fs(self) -> fsspec.AbstractFileSystem:
         if self._fs is None:
@@ -243,7 +249,10 @@ class ECMWFGrid:
         if settings.ecmwf_interpolation and len(new_timesteps) >= 2:
             from librewxr.data.ecmwf_interpolation import interpolate_timesteps
 
-            new_timesteps = interpolate_timesteps(new_timesteps)
+            new_timesteps, ecmwf_flow = interpolate_timesteps(new_timesteps)
+            self._flow = ecmwf_flow
+        else:
+            self._flow = None
 
         self._timesteps = new_timesteps
         self._sorted_timestamps = sorted(new_timesteps.keys())

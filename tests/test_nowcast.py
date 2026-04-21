@@ -224,12 +224,14 @@ class TestNowcastGeneratorSync:
         prev_regions = {"USCOMP": blob0}
         latest_regions = {"USCOMP": blob1}
 
-        frames = NowcastGenerator._generate_sync(
+        frames, flows = NowcastGenerator._generate_sync(
             prev_regions, latest_regions,
             latest_ts=1000, n_steps=3, interval=600,
         )
 
         assert len(frames) == 3
+        assert "USCOMP" in flows
+        assert flows["USCOMP"].shape == (H, W, 2)
         assert frames[0].timestamp == 1600
         assert frames[1].timestamp == 2200
         assert frames[2].timestamp == 2800
@@ -252,11 +254,12 @@ class TestNowcastGeneratorSync:
         prev_regions = {}  # no regions
         latest_regions = {"USCOMP": blob}
 
-        frames = NowcastGenerator._generate_sync(
+        frames, flows = NowcastGenerator._generate_sync(
             prev_regions, latest_regions,
             latest_ts=1000, n_steps=3, interval=600,
         )
         assert frames == []
+        assert flows == {}
 
     def test_generate_sync_multiple_regions(self):
         """Should generate nowcast for each region independently."""
@@ -268,10 +271,11 @@ class TestNowcastGeneratorSync:
         prev = {"A": blob0_a, "B": blob0_b}
         latest = {"A": blob1_a, "B": blob1_b}
 
-        frames = NowcastGenerator._generate_sync(
+        frames, flows = NowcastGenerator._generate_sync(
             prev, latest, latest_ts=2000, n_steps=2, interval=600,
         )
         assert len(frames) == 2
+        assert "A" in flows and "B" in flows
         for f in frames:
             assert "A" in f.regions
             assert "B" in f.regions

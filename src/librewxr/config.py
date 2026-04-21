@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     ecmwf_interpolation: bool = True  # Optical flow interpolation of IFS hourly data to 10-min frames
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
+    nowcast_blend_mode: str = "radar"  # "radar", "blended", or "ifs"
     cors_origins: list[str] = ["*"]
 
     def get_ecmwf_max_timesteps(self) -> int:

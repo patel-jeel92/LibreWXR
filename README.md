@@ -18,7 +18,8 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Europe (OPERA pan-European composite, ~155 radars across 24 countries), and Canada
 - **ECMWF IFS global fallback** — ECMWF IFS 9km precipitation data fills in worldwide coverage where no radar composite exists (~3x higher resolution than previous GFS fallback), with multi-timestep animation that auto-scales to match radar history length
 - **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global fallback areas animate smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
-- **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, smoothly blended with ECMWF IFS forecast (radar-weighted near-term, IFS-weighted far-term, with spatial feathering at radar coverage boundaries to prevent hard seams). Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
+- **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: pure radar extrapolation (default, closest to Rain Viewer), smooth radar-to-IFS blending, or pure IFS forecast. Beyond 60 minutes, always uses IFS. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
+- **Precipitation motion arrows** — optional Dark Sky-style arrows showing storm movement direction and speed, derived from optical flow. Available for both radar and ECMWF data globally. Supports light and dark styles for different map themes via `?arrows=light` or `?arrows=dark` query parameter
 - **Snow detection** — per-pixel snow/rain classification using ECMWF IFS snowfall data
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
@@ -136,6 +137,12 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | `snow` | `0`, `1` | Enable snow precipitation colors |
 | `ext` | `png`, `webp` | Image format |
 
+**Optional query parameters:**
+
+| Parameter | Values | Description |
+|---|---|---|
+| `arrows` | `light`, `dark` | Draw precipitation motion arrows (light for dark maps, dark for light maps) |
+
 **Color schemes:**
 
 | ID | Name |
@@ -191,6 +198,7 @@ All settings are configured via environment variables (or a `.env` file). Copy `
 | `LIBREWXR_ECMWF_INTERPOLATION` | `true` | Optical flow interpolation of IFS hourly data to 10-min frames |
 | `LIBREWXR_NOWCAST_ENABLED` | `true` | Enable precipitation nowcasting (experimental — radar extrapolation + IFS blending) |
 | `LIBREWXR_NOWCAST_FRAMES` | `6` | Number of nowcast frames (6 × 10 min = 60 min forecast) |
+| `LIBREWXR_NOWCAST_BLEND_MODE` | `radar` | Nowcast blend mode: `radar` (pure extrapolation), `blended` (radar→IFS transition), or `ifs` (pure IFS). Beyond 60 min always uses IFS |
 
 **Radar regions:**
 
@@ -272,7 +280,7 @@ The `examples/` directory contains ready-to-use HTML files for local development
 - **`leaflet.html`** — Leaflet-based radar map (connects to `localhost:8080`)
 - **`maplibre.html`** — MapLibre GL-based radar map (connects to `localhost:8080`)
 
-Open either file in a browser while LibreWXR is running to see the radar overlay on an interactive map.
+Both examples include animation controls, motion arrow toggles (off/light/dark), and nowcast support. Open either file in a browser while LibreWXR is running to see the radar overlay on an interactive map.
 
 The `examples/live-demo/` directory contains the same examples pre-configured to use the public LibreWXR instance at `api.librewxr.net` — no local server required. Just open them in a browser to try it out.
 

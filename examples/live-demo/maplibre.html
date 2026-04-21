@@ -55,6 +55,25 @@
         .buttons button:hover {
             background: #f5f5f5;
         }
+        .buttons select {
+            height: 36px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #fff;
+            font-size: 13px;
+            color: #555;
+            cursor: pointer;
+            padding: 0 8px;
+        }
+        .buttons label {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 13px;
+            color: #555;
+            cursor: pointer;
+            white-space: nowrap;
+        }
         #map {
             position: absolute;
             top: 50px;
@@ -70,6 +89,12 @@
     <span class="title">Weather Radar (LibreWXR)</span>
     <span id="timestamp">Loading...</span>
     <div class="buttons">
+        <select id="arrowsToggle" onchange="toggleArrows()">
+            <option value="">Arrows: Off</option>
+            <option value="light">Arrows: Light</option>
+            <option value="dark">Arrows: Dark</option>
+        </select>
+        <label id="hideAnimLabel" style="display:none"><input type="checkbox" id="hideAnimArrows" onchange="toggleHideAnimArrows()"> Hide during playback</label>
         <button onclick="stop(); showFrame(animationPosition - 1);">&#x2039;</button>
         <button id="playBtn" onclick="playStop();">&#x25B6;</button>
         <button onclick="stop(); showFrame(animationPosition + 1);">&#x203A;</button>
@@ -99,6 +124,8 @@ var animationTimer = false;
 var currentLayerId = null;
 var isLoading = false;
 var loadedPositions = new Set();
+var arrowsMode = '';
+var hideAnimArrows = false;
 
 // === MAP SETUP ===
 var map = new maplibregl.Map({
@@ -144,9 +171,11 @@ function formatTime(timestamp) {
 // === LAYER MANAGEMENT ===
 function createRadarSource(position, frame) {
     var sourceId = 'radar-' + position;
+    var useArrows = arrowsMode && !(hideAnimArrows && animationTimer);
+    var arrowsParam = useArrows ? '?arrows=' + arrowsMode : '';
     map.addSource(sourceId, {
         type: 'raster',
-        tiles: [apiData.host + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/4/1_1.png'],
+        tiles: [apiData.host + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/4/1_1.png' + arrowsParam],
         tileSize: 256,
         maxzoom: 12
     });
@@ -199,8 +228,36 @@ function play() {
 
 function playStop() {
     if (!stop()) {
+        if (hideAnimArrows && arrowsMode) clearAllLayers();
         play();
+    } else if (hideAnimArrows && arrowsMode) {
+        clearAllLayers();
+        showFrame(animationPosition);
     }
+}
+
+function clearAllLayers() {
+    isLoading = false;
+    loadedPositions.forEach(function(pos) {
+        var layerId = 'radar-layer-' + pos;
+        var sourceId = 'radar-' + pos;
+        if (map.getLayer(layerId)) map.removeLayer(layerId);
+        if (map.getSource(sourceId)) map.removeSource(sourceId);
+    });
+    loadedPositions.clear();
+    currentLayerId = null;
+}
+
+function toggleArrows() {
+    arrowsMode = document.getElementById('arrowsToggle').value;
+    document.getElementById('hideAnimLabel').style.display = arrowsMode ? '' : 'none';
+    stop();
+    clearAllLayers();
+    showFrame(animationPosition);
+}
+
+function toggleHideAnimArrows() {
+    hideAnimArrows = document.getElementById('hideAnimArrows').checked;
 }
 
 // === DISPLAY ===

@@ -40,7 +40,7 @@ _FARNEBACK = dict(
 def interpolate_timesteps(
     timesteps: dict[int, tuple[np.ndarray, np.ndarray]],
     interval_seconds: int = 600,
-) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], np.ndarray | None]:
     """Create sub-hourly frames by optical-flow interpolation between IFS hours.
 
     For each consecutive pair of hourly timesteps, computes a dense motion
@@ -52,10 +52,11 @@ def interpolate_timesteps(
         interval_seconds: Target interval between frames (default 600 = 10 min).
 
     Returns:
-        New dict containing both original and interpolated timesteps.
+        Tuple of (new dict containing both original and interpolated timesteps,
+        last computed flow field or None).
     """
     if len(timesteps) < 2:
-        return dict(timesteps)
+        return dict(timesteps), None
 
     sorted_ts = sorted(timesteps.keys())
     result = dict(timesteps)
@@ -66,6 +67,7 @@ def interpolate_timesteps(
 
     t0_wall = time.monotonic()
     total_interpolated = 0
+    last_flow = None
 
     for i in range(len(sorted_ts) - 1):
         ts0 = sorted_ts[i]
@@ -79,6 +81,7 @@ def interpolate_timesteps(
         precip1, snow1 = timesteps[ts1]
 
         flow = _compute_flow(precip0, precip1)
+        last_flow = flow
 
         n_steps = gap // interval_seconds
         for step in range(1, n_steps):
@@ -101,7 +104,7 @@ def interpolate_timesteps(
         total_interpolated, len(sorted_ts), elapsed,
     )
 
-    return result
+    return result, last_flow
 
 
 def _compute_flow(frame0: np.ndarray, frame1: np.ndarray) -> np.ndarray:
