@@ -4,8 +4,10 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
 from librewxr.config import settings
@@ -135,6 +137,17 @@ app.add_middleware(
 app.include_router(routes.router)
 
 
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Log requests to non-existent endpoints (path only, no client info)."""
+    if exc.status_code == 404 and exc.detail == "Not Found":
+        logger.warning("404 Not Found: %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+
 def main():
     import uvicorn
     uvicorn.run(
@@ -143,6 +156,7 @@ def main():
         port=settings.port,
         workers=settings.workers,
         log_level="info",
+        access_log=False,
     )
 
 
