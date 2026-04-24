@@ -594,10 +594,10 @@ function getLayerId(position) {
 
 function getTileUrl(frame) {
     if (activeLayer === 'satellite') {
-        return getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/0/0_0.png';
+        return getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/0/0_0.webp';
     } else {
         var arrowsParam = arrowsMode ? '?arrows=' + arrowsMode : '';
-        return getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + currentColorScheme + '/1_1.png' + arrowsParam;
+        return getHost() + frame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + currentColorScheme + '/1_1.webp' + arrowsParam;
     }
 }
 
@@ -683,7 +683,7 @@ function updateSatelliteBackground() {
 
     removeSatelliteBackground();
 
-    var satUrl = getHost() + latestSat.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/0/0_0.png';
+    var satUrl = getHost() + latestSat.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/0/0_0.webp';
 
     map.addSource('sat-bg', {
         type: 'raster',
