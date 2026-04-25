@@ -60,7 +60,7 @@ class TileWarmer:
             if ts == triggered_timestamp:
                 continue
 
-            cache_key = (ts, z, x, y, tile_size, color, smooth, snow, ext)
+            cache_key = (ts, z, x, y, tile_size, color, smooth, snow, ext, "")
 
             if self._cache.get(cache_key) is not None:
                 continue
@@ -129,6 +129,7 @@ class TileWarmer:
                 enabled_regions=self._enabled_regions,
                 frame_timestamp=frame_timestamp,
                 nowcast_blend=nowcast_blend,
+                arrow_style="",
             )
             self._cache.put(cache_key, tile_bytes)
         except Exception:
