@@ -334,3 +334,40 @@ def tile_pixel_indices_fractional(
 def tile_overlaps_composite(z: int, x: int, y: int) -> bool:
     """Check if a tile overlaps USCOMP (legacy wrapper)."""
     return tile_overlaps_region(_USCOMP, z, x, y)
+
+
+# ---------------------------------------------------------------------------
+# Cache pre-warming
+# ---------------------------------------------------------------------------
+
+
+def warm_coordinate_caches(
+    enabled_regions: list[str] | None, max_zoom: int, tile_size: int = 256
+) -> int:
+    """Pre-populate all coordinate LRU caches up to ``max_zoom``.
+
+    Iterates every tile coordinate at zooms 0 through ``max_zoom``,
+    computes overlapping regions, and calls each cached coordinate
+    function so that real tile requests never pay the cold-start cost
+    of trigonometric projections and array allocations.
+
+    Returns the number of unique (region, z, x, y, tile_size) cache
+    entries warmed.
+    """
+    warmed = 0
+    for z in range(max_zoom + 1):
+        n = 2**z
+        for y in range(n):
+            for x in range(n):
+                regions = overlapping_regions(z, x, y, enabled_regions)
+                if not regions:
+                    continue
+                # Tile-level lat/lon grids (used by ECMWF fallback, arrows)
+                tile_pixel_latlons(z, x, y, tile_size)
+                tile_pixel_latlons_padded(z, x, y, tile_size, pad=8)
+                for region in regions:
+                    region_pixel_indices(region, z, x, y, tile_size)
+                    region_pixel_indices_padded(region, z, x, y, tile_size, pad=8)
+                    region_pixel_indices_fractional(region, z, x, y, tile_size)
+                    warmed += 1
+    return warmed

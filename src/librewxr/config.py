@@ -21,9 +21,11 @@ class Settings(BaseSettings):
     smooth_radius: float = 2.0  # Gaussian blur radius when smoothing is enabled
     noise_floor_dbz: float = 10.0  # Minimum dBZ to display; lower values are zeroed out
     despeckle_min_neighbors: int = 3  # Min non-zero neighbors (of 8) to keep a pixel; 0 to disable
-    webp_quality: int = 80  # WebP quality: 100 = lossless, 1-99 = lossy at that quality
+    webp_quality: int = 65  # WebP quality: 100 = lossless, 1-99 = lossy at that quality
     workers: int = 1  # Number of uvicorn worker processes
     warmer_threads: int = 0  # Render thread pool size (0 = CPU count - 1)
+    warm_coord_zoom: int = 6  # Pre-warm coordinate caches up to this zoom (0 = disable)
+    warm_overview_zoom: int = 4  # Pre-render tiles up to this zoom on each fetch (set to -1 to disable)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
     msc_canada_base_url: str = "https://geo.weather.gc.ca"

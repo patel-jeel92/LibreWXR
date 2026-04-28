@@ -140,5 +140,66 @@ class TileWarmer:
         finally:
             self._pending.discard(cache_key)
 
+    async def warm_overview(
+        self,
+        ecmwf_grid=None,
+        max_zoom: int = 4,
+        tile_size: int = 256,
+        color: int = 7,
+        smooth: bool = False,
+        snow: bool = False,
+        ext: str = "png",
+    ) -> None:
+        """Pre-render all tiles at zooms 0 through ``max_zoom`` for every timestamp.
+
+        This ensures that overview / zoomed-out views are served instantly
+        from the cache instead of requiring an on-demand render.
+        """
+        timestamps = await self._store.get_timestamps()
+        if self._nowcast_store is not None:
+            nc_ts = await self._nowcast_store.get_timestamps()
+            timestamps = list(set(timestamps) | set(nc_ts))
+            timestamps.sort()
+
+        loop = asyncio.get_running_loop()
+        for ts in timestamps:
+            # Try radar store first, then nowcast store
+            nowcast_blend = None
+            frame = await self._store.get_frame(ts)
+            if frame is None and self._nowcast_store is not None:
+                nc_frame, nowcast_blend = await self._nowcast_store.get_frame(ts)
+                if nc_frame is not None:
+                    frame = nc_frame
+            if frame is None:
+                continue
+            frame_regions = frame.regions
+
+            for z in range(max_zoom + 1):
+                n = 2**z
+                for y in range(n):
+                    for x in range(n):
+                        cache_key = (ts, z, x, y, tile_size, color, smooth, snow, ext, "")
+                        if self._cache.get(cache_key) is not None:
+                            continue
+                        async with self._lock:
+                            if cache_key in self._pending:
+                                continue
+                            self._pending.add(cache_key)
+                        loop.run_in_executor(
+                            self._executor,
+                            self._render_and_cache,
+                            cache_key,
+                            frame_regions,
+                            z, x, y,
+                            tile_size,
+                            color,
+                            smooth,
+                            snow,
+                            ext,
+                            ecmwf_grid,
+                            ts,
+                            nowcast_blend,
+                        )
+
     def shutdown(self) -> None:
         pass  # Executor is shared; lifecycle managed by main.py

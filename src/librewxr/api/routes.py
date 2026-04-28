@@ -245,10 +245,16 @@ async def radar_tile(
             )
         )
 
+    # Historical frames are immutable once backfill is complete — cache them
+    # for their full 2-hour lifetime.  Latest and nowcast frames still evolve.
+    timestamps = await frame_store.get_timestamps()
+    latest_ts = max(timestamps) if timestamps else None
+    max_age = 7200 if (latest_ts is not None and timestamp < latest_ts) else 300
+
     return Response(
         content=tile_bytes,
         media_type=_content_type(ext),
-        headers={"Cache-Control": "public, max-age=300"},
+        headers={"Cache-Control": f"public, max-age={max_age}"},
     )
 
 
@@ -330,8 +336,13 @@ async def satellite_tile(
 
     tile_cache.put(cache_key, tile_bytes)
 
+    # Satellite frames are all historical once loaded (IFS model-run based)
+    satellite_timestamps = cloud_grid.timestamps if cloud_grid else []
+    latest_sat_ts = max(satellite_timestamps) if satellite_timestamps else None
+    max_age = 7200 if (latest_sat_ts is not None and timestamp < latest_sat_ts) else 300
+
     return Response(
         content=tile_bytes,
         media_type=_content_type(ext),
-        headers={"Cache-Control": "public, max-age=300"},
+        headers={"Cache-Control": f"public, max-age={max_age}"},
     )

@@ -31,6 +31,7 @@ from librewxr.tiles.coordinates import (
     tile_pixel_indices_padded,
     tile_pixel_latlons,
     tile_pixel_latlons_padded,
+    warm_coordinate_caches,
 )
 from librewxr.tiles.warmer import TileWarmer
 
@@ -132,6 +133,32 @@ async def lifespan(app: FastAPI):
     )
     await fetcher.start()
     await monitor.start()
+
+    # Pre-warm coordinate caches so the first tile requests at each zoom
+    # don't pay the cost of trigonometric projections and array allocations.
+    if settings.warm_coord_zoom > 0:
+        start = time.time()
+        loop = asyncio.get_running_loop()
+        warmed = await loop.run_in_executor(
+            warmer_executor,
+            warm_coordinate_caches,
+            enabled,
+            settings.warm_coord_zoom,
+        )
+        logger.info(
+            "Coordinate caches warmed: %d entries up to zoom %d (%.2fs)",
+            warmed, settings.warm_coord_zoom, time.time() - start,
+        )
+
+    # Pre-render overview tiles in the background so zoomed-out views are
+    # served instantly from cache.
+    if settings.warm_overview_zoom >= 0:
+        asyncio.create_task(
+            warmer.warm_overview(
+                ecmwf_grid=ecmwf_grid,
+                max_zoom=settings.warm_overview_zoom,
+            )
+        )
 
     yield
 
