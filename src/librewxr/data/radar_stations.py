@@ -468,6 +468,18 @@ REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
     "HICOMP": NEXRAD_HAWAII,
     "PRCOMP": NEXRAD_PUERTO_RICO,
     "GUCOMP": NEXRAD_GUAM,
-"CACOMP": CANADA_STATIONS,
+    "CACOMP": CANADA_STATIONS,
     "OPERA": OPERA_STATIONS,
+}
+
+# MRMS ingests both NEXRAD (US) and ECCC (Canadian) radar networks.
+# Per-region station lists for coverage masks when MRMS is the active source.
+# Used when LIBREWXR_NA_SOURCE=mrms or mrms_fallback.
+MRMS_STATIONS: dict[str, list[tuple[float, float]]] = {
+    "USCOMP": NEXRAD_CONUS + CANADA_STATIONS,
+    "CACOMP": NEXRAD_CONUS + CANADA_STATIONS,
+    "AKCOMP": NEXRAD_ALASKA,
+    "HICOMP": NEXRAD_HAWAII,
+    "PRCOMP": NEXRAD_PUERTO_RICO,
+    "GUCOMP": NEXRAD_GUAM,
 }

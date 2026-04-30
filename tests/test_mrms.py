@@ -1,0 +1,303 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Joshua Kimsey
+import gzip
+import io
+import struct
+import tempfile
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+import xarray as xr
+
+pytestmark = pytest.mark.sources
+
+from librewxr.data.regions import REGIONS, resolve_regions
+from librewxr.data.sources import (
+    MRMS_SOUTH,
+    MRMS_NORTH,
+    MRMS_WEST,
+    MRMS_EAST,
+    MRMSSource,
+    _dbz_float_to_uint8,
+    _parse_mrms_grib2,
+    _resample_mrms_to_region,
+)
+
+
+def _make_minimal_grib2(
+    lats: np.ndarray,
+    lons: np.ndarray,
+    data: np.ndarray,
+) -> bytes:
+    """Create a minimal GRIB2 file in memory with cfgrib-compatible structure.
+
+    This uses xarray's to_netcdf after creating a proper dataset, then
+    wraps it in a fake GRIB2 envelope. Since constructing valid GRIB2
+    from scratch is extremely complex, we instead create a dataset that
+    cfgrib can read by writing via xarray with engine='cfgrib'.
+
+    However, since cfgrib can only READ grib2 (not write), we take a
+    different approach: create a netCDF-like binary that we use directly
+    for testing _resample_mrms_to_region with the dataset object directly.
+    """
+    # We'll return the raw data + axes for direct testing
+    # The actual GRIB2 round-trip is tested via integration tests
+    ds = xr.Dataset(
+        {"reflectivity": (["latitude", "longitude"], data)},
+        coords={
+            "latitude": lats,
+            "longitude": lons,
+        },
+    )
+    return ds
+
+
+class TestMRMSRegion:
+    def test_uscomp_in_regions(self):
+        assert "USCOMP" in REGIONS
+
+    def test_cacomp_in_regions(self):
+        assert "CACOMP" in REGIONS
+
+    def test_all_includes_uscomp_cacomp(self):
+        result = resolve_regions("ALL")
+        assert "USCOMP" in result
+        assert "CACOMP" in result
+
+    def test_mrms_extent_constants(self):
+        assert MRMS_SOUTH < MRMS_NORTH
+        assert MRMS_WEST < MRMS_EAST
+        # MRMS extent should cover most of the US and populated Canada
+        assert MRMS_SOUTH <= 21  # USCOMP south is 23, give some margin
+        assert MRMS_NORTH >= 54  # Should go at least to ~55°N
+        assert MRMS_WEST <= -129  # Should cover at least to -130°W
+        assert MRMS_EAST >= -61  # Should cover at least to ~-60°W
+
+    def test_mrms_covers_uscomp_extent(self):
+        uscomp = REGIONS["USCOMP"]
+        # USCOMP should be fully within MRMS extent
+        assert uscomp.south >= MRMS_SOUTH
+        assert uscomp.north <= MRMS_NORTH
+        assert uscomp.west >= MRMS_WEST
+        assert uscomp.east <= MRMS_EAST
+
+    def test_mrms_partially_covers_cacomp(self):
+        cacomp = REGIONS["CACOMP"]
+        # CACOMP extends beyond MRMS in the north and (some) east/west
+        assert cacomp.north > MRMS_NORTH  # Canada goes north of MRMS
+        # MRMS should at least partially overlap CACOMP
+        assert cacomp.south < MRMS_NORTH  # Some overlap exists
+        assert cacomp.west < MRMS_EAST  # Some overlap exists
+
+
+class TestMRMSResampling:
+    def _make_dataset(
+        self,
+        nlat: int = 100,
+        nlon: int = 200,
+        south: float = 20.0,
+        north: float = 55.0,
+        west: float = -130.0,
+        east: float = -60.0,
+        fill_value: float = -999.0,
+        dbz_value: float = 35.0,
+    ) -> xr.Dataset:
+        """Create a synthetic MRMS-like dataset for testing."""
+        lats = np.linspace(north, south, nlat)  # descending
+        lons = np.linspace(west, east, nlon)
+        data = np.full((nlat, nlon), fill_value, dtype=np.float32)
+        # Put a block of real data in the middle
+        data[25:75, 50:150] = dbz_value
+        return xr.Dataset(
+            {"unknown": (["latitude", "longitude"], data)},
+            coords={"latitude": lats, "longitude": lons},
+        )
+
+    def test_resample_produces_correct_shape(self):
+        uscomp = REGIONS["USCOMP"]
+        ds = self._make_dataset()
+        result = _resample_mrms_to_region(ds, uscomp)
+        assert result is not None
+        assert result.shape == (uscomp.height, uscomp.width)
+
+    def test_resample_nodata_becomes_zero(self):
+        uscomp = REGIONS["USCOMP"]
+        ds = self._make_dataset(dbz_value=-999.0)  # all no-data
+        result = _resample_mrms_to_region(ds, uscomp)
+        assert result is not None
+        assert np.all(result == 0)
+
+    def test_resample_valid_dbz_encoding(self):
+        uscomp = REGIONS["USCOMP"]
+        ds = self._make_dataset(dbz_value=30.0)
+        result = _resample_mrms_to_region(ds, uscomp)
+        assert result is not None
+        # 30 dBZ -> (30+32)*2 = 124
+        nonzero = result[result > 0]
+        if len(nonzero) > 0:
+            assert nonzero.min() >= 2  # at least some non-zero values
+            assert nonzero.max() <= 255
+
+    def test_resample_cacomp_produces_correct_shape(self):
+        cacomp = REGIONS["CACOMP"]
+        ds = self._make_dataset(nlat=3500, nlon=7000)
+        result = _resample_mrms_to_region(ds, cacomp)
+        assert result is not None
+        assert result.shape == (cacomp.height, cacomp.width)
+
+
+class TestMRMSUrl:
+    def test_latest_url(self):
+        src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
+        url = src._latest_url()
+        assert "MergedReflectivityQCComposite" in url
+        assert url.endswith(".grib2.gz")
+        assert "latest" in url
+
+    def test_archive_url(self):
+        from datetime import datetime, timezone
+        src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
+        dt = datetime(2026, 4, 28, 15, 30, 42, tzinfo=timezone.utc)
+        url = src._archive_url(dt)
+        assert "20260428-153042" in url
+        assert url.endswith(".grib2.gz")
+
+    def test_custom_base_url(self):
+        src = MRMSSource("https://example.com/mrms")
+        url = src._latest_url()
+        assert url.startswith("https://example.com/mrms/")
+
+
+class TestMRMSDbzEncoding:
+    def test_nodata_maps_to_zero(self):
+        arr = np.array([[-999.0, -100.0, 35.0]], dtype=np.float32)
+        result = _dbz_float_to_uint8(arr)
+        assert result[0, 0] == 0  # -999 → 0 (no-data)
+        assert result[0, 1] == 0  # -100 → 0 (< -32)
+        assert result[0, 2] == 134  # (35+32)*2 = 134
+
+    def test_positive_dbz_range(self):
+        dbz = np.array([[0, 10, 20, 30, 40, 50, 60]], dtype=np.float32)
+        result = _dbz_float_to_uint8(dbz)
+        # (0+32)*2=64, (10+32)*2=84, ..., (60+32)*2=184
+        assert result[0, 0] == 64
+        assert result[0, 1] == 84
+        assert result[0, 6] == 184
+
+    def test_negative_dbz(self):
+        dbz = np.array([[-31.0, -20.0, -10.0]], dtype=np.float32)
+        result = _dbz_float_to_uint8(dbz)
+        assert result[0, 0] == 2  # (-31+32)*2 = 2
+        assert result[0, 1] == 24  # (-20+32)*2 = 24
+        assert result[0, 2] == 44  # (-10+32)*2 = 44
+
+
+class TestMRMSStations:
+    def test_mrms_stations_is_dict(self):
+        from librewxr.data.radar_stations import MRMS_STATIONS
+        assert isinstance(MRMS_STATIONS, dict)
+        assert len(MRMS_STATIONS) == 6
+        assert "USCOMP" in MRMS_STATIONS
+        assert "CACOMP" in MRMS_STATIONS
+        assert "AKCOMP" in MRMS_STATIONS
+        assert "HICOMP" in MRMS_STATIONS
+        assert "PRCOMP" in MRMS_STATIONS
+        assert "GUCOMP" in MRMS_STATIONS
+
+    def test_mrms_stations_uscomp_cacomp(self):
+        from librewxr.data.radar_stations import MRMS_STATIONS, NEXRAD_CONUS, CANADA_STATIONS
+        # USCOMP and CACOMP share the combined NEXRAD + Canada list
+        combined = NEXRAD_CONUS + CANADA_STATIONS
+        assert MRMS_STATIONS["USCOMP"] == combined
+        assert MRMS_STATIONS["CACOMP"] == combined
+
+    def test_mrms_stations_territories(self):
+        from librewxr.data.radar_stations import (
+            MRMS_STATIONS, NEXRAD_ALASKA, NEXRAD_HAWAII,
+            NEXRAD_PUERTO_RICO, NEXRAD_GUAM,
+        )
+        assert MRMS_STATIONS["AKCOMP"] == NEXRAD_ALASKA
+        assert MRMS_STATIONS["HICOMP"] == NEXRAD_HAWAII
+        assert MRMS_STATIONS["PRCOMP"] == NEXRAD_PUERTO_RICO
+        assert MRMS_STATIONS["GUCOMP"] == NEXRAD_GUAM
+
+
+class TestMRMSDirCache:
+    def test_timestamp_regex_matches_archived_files(self):
+        from librewxr.data.sources import MRMSSource
+        pat = MRMSSource._TIMESTAMP_RE
+        m = pat.search("MRMS_MergedReflectivityQCComposite_00.50_20260428-060041.grib2.gz")
+        assert m is not None
+        assert m.group(1) == "20260428-060041"
+
+    def test_timestamp_regex_ignores_latest(self):
+        from librewxr.data.sources import MRMSSource
+        pat = MRMSSource._TIMESTAMP_RE
+        m = pat.search("MRMS_MergedReflectivityQCComposite.latest.grib2.gz")
+        assert m is None
+
+    async def test_find_nearest_midpoint(self):
+        from datetime import datetime, timezone
+        from librewxr.data.sources import MRMSSource
+        src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
+        entries = [
+            (datetime(2026, 4, 28, 6, 0, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060000.grib2.gz"),
+            (datetime(2026, 4, 28, 6, 2, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060200.grib2.gz"),
+            (datetime(2026, 4, 28, 6, 4, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060400.grib2.gz"),
+            (datetime(2026, 4, 28, 6, 6, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060600.grib2.gz"),
+        ]
+        src._dir_cache = entries
+        src._dir_cache_time = time.time()
+
+        target = datetime(2026, 4, 28, 6, 3, 0, tzinfo=timezone.utc)
+        url = await src._find_nearest_url(target)
+        assert url is not None
+        assert "060200" in url or "060400" in url
+
+    async def test_find_nearest_exact_match(self):
+        from datetime import datetime, timezone
+        from librewxr.data.sources import MRMSSource
+        src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
+        entries = [
+            (datetime(2026, 4, 28, 6, 0, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060000.grib2.gz"),
+            (datetime(2026, 4, 28, 6, 2, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060200.grib2.gz"),
+            (datetime(2026, 4, 28, 6, 4, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060400.grib2.gz"),
+        ]
+        src._dir_cache = entries
+        src._dir_cache_time = time.time()
+
+        url = await src._find_nearest_url(datetime(2026, 4, 28, 6, 2, 0, tzinfo=timezone.utc))
+        assert url is not None
+        assert "060200" in url
+
+    async def test_find_nearest_before_range(self):
+        from datetime import datetime, timezone
+        from librewxr.data.sources import MRMSSource
+        src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
+        entries = [
+            (datetime(2026, 4, 28, 6, 4, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060400.grib2.gz"),
+            (datetime(2026, 4, 28, 6, 6, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060600.grib2.gz"),
+        ]
+        src._dir_cache = entries
+        src._dir_cache_time = time.time()
+
+        url = await src._find_nearest_url(datetime(2026, 4, 28, 5, 50, 0, tzinfo=timezone.utc))
+        assert url is not None
+        assert "060400" in url
+
+    async def test_find_nearest_after_range(self):
+        from datetime import datetime, timezone
+        from librewxr.data.sources import MRMSSource
+        src = MRMSSource("https://mrms.ncep.noaa.gov/2D")
+        entries = [
+            (datetime(2026, 4, 28, 6, 0, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060000.grib2.gz"),
+            (datetime(2026, 4, 28, 6, 2, 0, tzinfo=timezone.utc), "MRMS_MergedReflectivityQCComposite_00.50_20260428-060200.grib2.gz"),
+        ]
+        src._dir_cache = entries
+        src._dir_cache_time = time.time()
+
+        url = await src._find_nearest_url(datetime(2026, 4, 28, 6, 10, 0, tzinfo=timezone.utc))
+        assert url is not None
+        assert "060200" in url

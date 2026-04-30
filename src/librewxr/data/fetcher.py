@@ -14,6 +14,11 @@ from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import (
     IEMSource,
+    MRMS_SOUTH,
+    MRMS_NORTH,
+    MRMS_WEST,
+    MRMS_EAST,
+    MRMSSource,
     MSCCanadaSource,
     OperaSource,
 )
@@ -25,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 class RadarFetcher:
     """Background task that periodically fetches radar frames."""
+
+    # Regions that MRMS can serve (each has its own regional product).
+    _MRMS_REGIONS = {
+        "USCOMP", "CACOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"
+    }
 
     def __init__(
         self,
@@ -45,16 +55,28 @@ class RadarFetcher:
             REGIONS[name] for name in settings.get_enabled_regions()
         ]
 
+        self._na_source = settings.na_source
+
         # Build a source for each enabled region based on its group
+        # and the na_source setting.
         self._sources: dict[
             str,
-            IEMSource | MSCCanadaSource | OperaSource,
+            IEMSource | MSCCanadaSource | OperaSource | MRMSSource,
         ] = {}
         iem_source: IEMSource | None = None
         canada_source: MSCCanadaSource | None = None
         opera_source: OperaSource | None = None
+        mrms_sources: dict[str, MRMSSource] = {}
+
+        use_mrms = self._na_source in ("mrms", "mrms_fallback")
         for region in self._enabled_regions:
-            if region.group == "CANADA":
+            if use_mrms and region.name in self._MRMS_REGIONS:
+                if region.name not in mrms_sources:
+                    mrms_sources[region.name] = MRMSSource(
+                        settings.mrms_base_url, region_name=region.name
+                    )
+                self._sources[region.name] = mrms_sources[region.name]
+            elif region.group == "CANADA":
                 if canada_source is None:
                     canada_source = MSCCanadaSource(settings.msc_canada_base_url)
                 self._sources[region.name] = canada_source
@@ -66,6 +88,23 @@ class RadarFetcher:
                 if iem_source is None:
                     iem_source = IEMSource(settings.iem_base_url)
                 self._sources[region.name] = iem_source
+
+        # MSC blending for CACOMP: only in mrms_fallback mode.
+        self._cacomp_msc_source: MSCCanadaSource | None = None
+        if self._na_source == "mrms_fallback" and any(
+            r.name == "CACOMP" for r in self._enabled_regions
+        ):
+            if canada_source is None:
+                canada_source = MSCCanadaSource(settings.msc_canada_base_url)
+            self._cacomp_msc_source = canada_source
+
+        # IEM fallback for all US-group MRMS regions: only in mrms_fallback.
+        self._iem_fallback: IEMSource | None = None
+        if self._na_source == "mrms_fallback" and any(
+            r.name in self._MRMS_REGIONS and r.group == "US"
+            for r in self._enabled_regions
+        ):
+            self._iem_fallback = IEMSource(settings.iem_base_url)
 
     async def start(self) -> None:
         """Start the background fetch loop.
@@ -93,6 +132,12 @@ class RadarFetcher:
             if id(source) not in closed:
                 await source.close()
                 closed.add(id(source))
+        if self._iem_fallback and id(self._iem_fallback) not in closed:
+            await self._iem_fallback.close()
+            closed.add(id(self._iem_fallback))
+        if self._cacomp_msc_source and id(self._cacomp_msc_source) not in closed:
+            await self._cacomp_msc_source.close()
+            closed.add(id(self._cacomp_msc_source))
         if self._ecmwf_grid:
             await self._ecmwf_grid.close()
         logger.info("Radar fetcher stopped")
@@ -257,7 +302,21 @@ class RadarFetcher:
                 )
                 continue
             if result is None:
-                continue
+                # MRMS fallback: if MRMS returned None, try IEM for USCOMP
+                # or MSC standalone for CACOMP.
+                fallback_result = await self._try_fallback(region, ts, source_type, source_arg)  # noqa: E501
+                if fallback_result is not None:
+                    result = fallback_result
+                else:
+                    continue
+            else:
+                # CACOMP blending: only in mrms_fallback mode.
+                if (
+                    self._na_source == "mrms_fallback"
+                    and region.name == "CACOMP"
+                    and self._cacomp_msc_source is not None
+                ):
+                    result = await self._blend_cacomp(result, region, ts, source_type, source_arg)  # noqa: E501
 
             if settings.despeckle_min_neighbors > 0:
                 result = _despeckle(result, settings.despeckle_min_neighbors)
@@ -287,6 +346,114 @@ class RadarFetcher:
             "Fetch complete: %d frames added, %d total in store (%s)",
             added, count, region_summary,
         )
+
+    async def _try_fallback(
+        self,
+        region: RegionDef,
+        ts: int,
+        source_type: str,
+        source_arg: int | datetime,
+    ) -> np.ndarray | None:
+        """Fall back to IEM if MRMS fails for any US-group region, or MSC for CACOMP."""
+        if self._na_source != "mrms_fallback":
+            return None
+
+        # US-group MRMS regions fall back to IEM
+        if (
+            region.name in self._MRMS_REGIONS
+            and region.group == "US"
+            and self._iem_fallback is not None
+        ):
+            logger.info("MRMS failed for %s, falling back to IEM", region.name)
+            try:
+                if source_type == "live":
+                    return await self._iem_fallback.fetch_frame(region, source_arg)
+                else:
+                    return await self._iem_fallback.fetch_archive_frame(region, source_arg)
+            except Exception:
+                logger.exception("IEM fallback also failed for %s", region.name)
+                return None
+
+        # CACOMP fallback: use MSC Canada standalone (no MRMS blending)
+        if region.name == "CACOMP" and self._cacomp_msc_source is not None:
+            logger.info("MRMS failed for CACOMP, falling back to MSC standalone")
+            try:
+                if source_type == "live":
+                    return await self._cacomp_msc_source.fetch_frame(region, source_arg)
+                else:
+                    return await self._cacomp_msc_source.fetch_archive_frame(region, source_arg)
+            except Exception:
+                logger.exception("MSC fallback also failed for CACOMP")
+                return None
+
+        return None
+
+    async def _blend_cacomp(
+        self,
+        mrms_data: np.ndarray,
+        region: RegionDef,
+        ts: int,
+        source_type: str,
+        source_arg: int | datetime,
+    ) -> np.ndarray:
+        """Blend MRMS and MSC Canada data for CACOMP.
+
+        MRMS data takes priority within its extent (20-55°N, -130 to -60°W).
+        MSC fills gaps: north of 55°N, east of -60°W, west of -130°W.
+        """
+        # Fetch MSC Canada data for the same timestamp
+        msc_data: np.ndarray | None = None
+        if self._cacomp_msc_source is not None:
+            try:
+                if source_type == "live":
+                    msc_data = await self._cacomp_msc_source.fetch_frame(region, source_arg)
+                else:
+                    msc_data = await self._cacomp_msc_source.fetch_archive_frame(region, source_arg)
+            except Exception:
+                logger.exception("MSC Canada fetch failed during CACOMP blend")
+
+        if msc_data is None:
+            logger.warning("CACOMP: MSC data unavailable, using MRMS only")
+            return mrms_data
+
+        # Build the MRMS extent mask at the region's pixel resolution
+        # Lats go north-to-south (row 0 = northernmost pixel) to match
+        # the data array convention used by the renderer.
+        ps = region.pixel_size
+        ps_y = region._ps_y
+        north_center = region.north - ps_y / 2
+        south_center = region.south + ps_y / 2
+        lats = np.linspace(north_center, south_center, region.height)
+        lons = np.arange(region.west, region.east, ps)
+
+        # Ensure shapes match (region might compute slightly different dims)
+        if lats.shape[0] != mrms_data.shape[0] or lons.shape[0] != mrms_data.shape[1]:
+            # Fall back to MRMS shape if there's a mismatch
+            h, w = mrms_data.shape
+            lats = np.linspace(region.north, region.south, h, endpoint=False) + ps_y / 2
+            lons = np.linspace(region.west, region.east, w, endpoint=False)
+
+        # Pixel-level mask: True where MRMS has data (within its extent)
+        mrms_extent_mask = (
+            (lats[:, None] >= MRMS_SOUTH) &
+            (lats[:, None] <= MRMS_NORTH) &
+            (lons[None, :] >= MRMS_WEST) &
+            (lons[None, :] <= MRMS_EAST)
+        )
+
+        # Blend: start with MSC, overlay MRMS where available
+        result = msc_data.copy()
+        # Only overlay MRMS where it has actual data (non-zero) within its extent
+        mrms_has_data = (mrms_data > 0) & mrms_extent_mask
+        result[mrms_has_data] = mrms_data[mrms_has_data]
+
+        # Outside MRMS extent, keep MSC as-is (including zeros for no data)
+        # Inside MRMS extent but where MRMS has no data (value=0), also keep
+        # MSC if it has data — but only if MSC data exists.
+        mrms_extent_nodata = mrms_extent_mask & (mrms_data == 0) & (msc_data > 0)
+        result[mrms_extent_nodata] = msc_data[mrms_extent_nodata]
+
+        return result
 
 
 def _despeckle(data: np.ndarray, min_neighbors: int) -> np.ndarray:

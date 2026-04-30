@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "httpx>=0.28",
+    "rich>=13.0",
     "numpy>=2.0",
     "Pillow>=11.0",
     "pydantic-settings>=2.7",
@@ -20,6 +21,8 @@ dependencies = [
     "earthkit-regrid>=0.4",
     "s3fs>=2024.0",
     "opencv-python-headless>=4.8",
+    "cfgrib>=0.9.14",
+    "xarray>=2024.1.0",
 ]
 
 [project.optional-dependencies]

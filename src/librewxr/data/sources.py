@@ -1,18 +1,47 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
+import asyncio
+import bisect
+import gzip
 import io
 import logging
+import os
+import re
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import h5py
 import httpx
 import numpy as np
+import xarray as xr
 from PIL import Image
 
 from librewxr.data.regions import RegionDef
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _suppress_eccodes_stderr():
+    """Redirect OS-level stderr to /dev/null during the block.
+
+    The eccodes C library (used by cfgrib) writes non-actionable
+    ``dataTime`` truncation messages directly to stderr.  This silences
+    them without affecting Python logging or other error reporting.
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    original = os.dup(2)
+    try:
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(original, 2)
+        os.close(devnull)
+        os.close(original)
+
 
 class IEMSource:
     """Iowa Environmental Mesonet NEXRAD composite source.
@@ -286,16 +315,22 @@ class MSCCanadaSource:
             params.append(f"TIME={time_iso}")
         return f"{self._base_url}{self._WMS_PATH}?" + "&".join(params)
 
+    # MSC publishes radar composites on a ~6-minute cadence.  When a
+    # requested timestamp is not yet available (common for the most recent
+    # slots or when our aligned timestamps drift slightly ahead of real
+    # time), we fall back to progressively older 6-minute slots.
+    _CADENCE_SEC = 360  # 6 minutes
+    _MAX_TIME_RETRIES = 2
+
     async def fetch_frame(
         self, region: RegionDef, minutes_ago: int
     ) -> np.ndarray | None:
         """Fetch a live frame.  minutes_ago=0 → server default (latest)."""
         if minutes_ago <= 0:
             return await self._fetch(region, None)
-        # MSC cadence is 6 minutes — let the server snap to nearest timestep
         target_ts = int(time.time()) - minutes_ago * 60
         target = datetime.fromtimestamp(target_ts, tz=timezone.utc)
-        return await self._fetch(region, target.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return await self._fetch_with_fallback(region, target)
 
     async def fetch_archive_frame(
         self, region: RegionDef, dt: datetime
@@ -303,9 +338,7 @@ class MSCCanadaSource:
         """Fetch a specific historical frame via WMS TIME parameter."""
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return await self._fetch(
-            region, dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
+        return await self._fetch_with_fallback(region, dt)
 
     async def _fetch(
         self, region: RegionDef, time_iso: str | None
@@ -333,6 +366,35 @@ class MSCCanadaSource:
         except Exception:
             logger.exception("Error fetching MSC Canada WMS")
             return None
+
+    async def _fetch_with_fallback(
+        self, region: RegionDef, target_dt: datetime
+    ) -> np.ndarray | None:
+        """Fetch with progressive fallback to older MSC timesteps.
+
+        MSC cadence is ~6 minutes and the most recent 1-2 slots are often
+        not yet published.  If the requested TIME returns an XML exception,
+        step backwards in 6-minute increments up to ``_MAX_TIME_RETRIES``.
+        """
+        from datetime import timedelta
+
+        for attempt in range(self._MAX_TIME_RETRIES + 1):
+            ts_iso = target_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            result = await self._fetch(region, ts_iso)
+            if result is not None:
+                if attempt > 0:
+                    logger.debug(
+                        "MSC Canada fallback succeeded: %s (attempt %d)",
+                        ts_iso, attempt,
+                    )
+                return result
+            target_dt -= timedelta(seconds=self._CADENCE_SEC)
+
+        logger.debug(
+            "MSC Canada WMS no data after %d fallback attempts",
+            self._MAX_TIME_RETRIES,
+        )
+        return None
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
@@ -456,5 +518,386 @@ def _parse_opera_hdf5(data: bytes) -> np.ndarray | None:
     except Exception:
         logger.exception("Failed to parse OPERA HDF5")
         return None
+
+
+# ── MRMS (NOAA Multi-Radar/Multi-Sensor) source ─────────────────────
+
+
+# MRMS MergedReflectivityQCComposite per-region product paths and extents.
+# Each US territory has its own MRMS regional product on the NCEP server.
+MRMS_PRODUCTS: dict[str, str] = {
+    "USCOMP": "MergedReflectivityQCComposite",
+    "CACOMP": "MergedReflectivityQCComposite",
+    "AKCOMP": "ALASKA/MergedReflectivityQCComposite",
+    "HICOMP": "HAWAII/MergedReflectivityQCComposite",
+    "PRCOMP": "CARIB/MergedReflectivityQCComposite",
+    "GUCOMP": "GUAM/MergedReflectivityQCComposite",
+}
+
+# MRMS grid extents per region (south, north, west, east) in degrees.
+# These match the actual GRIB2 grid bounds from NCEP.
+MRMS_EXTENTS: dict[str, tuple[float, float, float, float]] = {
+    "USCOMP": (20.005, 54.995, -129.995, -60.005),
+    "CACOMP": (20.005, 54.995, -129.995, -60.005),
+    "AKCOMP": (50.005, 71.995, -175.995, -126.005),
+    "HICOMP": (15.002, 25.997, -163.998, -151.002),
+    "PRCOMP": (10.005, 24.995, -89.995, -60.005),
+    "GUCOMP": (9.002, 17.997, 140.002, 149.998),
+}
+
+# Kept for backward compat with CACOMP blending code
+MRMS_SOUTH = 20.005
+MRMS_NORTH = 54.995
+MRMS_WEST = -129.995
+MRMS_EAST = -60.005
+
+
+class MRMSSource:
+    """NOAA MRMS MergedReflectivityQCComposite source.
+
+    Fetches the quality-controlled composite reflectivity product from the
+    NCEP real-time GRIB2 endpoint.  Supports both the CONUS product
+    (USCOMP/CACOMP) and regional products for Alaska, Hawaii, Caribbean
+    (Puerto Rico), and Guam.
+
+    The live endpoint publishes a ``.latest.grib2.gz`` file updated every
+    ~2 minutes.  Archive files follow the pattern
+    ``MRMS_MergedReflectivityQCComposite_00.50_YYYYMMDD-HHMMSS.grib2.gz``.
+
+    No-data is encoded as -999.0; valid values are dBZ.
+    """
+
+    _TIMESTAMP_RE = re.compile(
+        r"MRMS_MergedReflectivityQCComposite_00\.50_(\d{8}-\d{6})\.grib2\.gz"
+    )
+
+    def __init__(
+        self,
+        base_url: str = "https://mrms.ncep.noaa.gov/2D",
+        region_name: str = "USCOMP",
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._region_name = region_name
+        self._product = MRMS_PRODUCTS[region_name]
+        self._client: httpx.AsyncClient | None = None
+        # Directory listing cache: sorted list of (datetime, filename) tuples.
+        # Refreshed once per fetch cycle.
+        self._dir_cache: list[tuple[datetime, str]] | None = None
+        self._dir_cache_time: float = 0.0
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=15.0),
+                follow_redirects=True,
+            )
+        return self._client
+
+    def _latest_url(self) -> str:
+        product_name = self._product.split("/")[-1]
+        return (
+            f"{self._base_url}/{self._product}"
+            f"/MRMS_{product_name}.latest.grib2.gz"
+        )
+
+    def _archive_url(self, dt: datetime) -> str:
+        ts = dt.strftime("%Y%m%d-%H%M%S")
+        product_name = self._product.split("/")[-1]
+        return (
+            f"{self._base_url}/{self._product}"
+            f"/MRMS_{product_name}_00.50_{ts}.grib2.gz"
+        )
+
+    async def fetch_frame(
+        self, region: RegionDef, minutes_ago: int
+    ) -> np.ndarray | None:
+        """Fetch live MRMS frame.
+
+        For minutes_ago == 0, uses the ``.latest`` endpoint.
+        For minutes_ago > 0, scans the directory listing to find the
+        file closest to the target time.
+        """
+        if minutes_ago <= 0:
+            return await self._fetch_and_parse(self._latest_url(), region)
+
+        # Calculate target timestamp and find nearest file
+        target_ts = int(time.time()) - minutes_ago * 60
+        target_dt = datetime.fromtimestamp(target_ts, tz=timezone.utc)
+        url = await self._find_nearest_url(target_dt)
+        if url is not None:
+            return await self._fetch_and_parse(url, region)
+
+        # Fallback to .latest if directory scan failed
+        logger.warning("MRMS directory scan failed, falling back to .latest")
+        return await self._fetch_and_parse(self._latest_url(), region)
+
+    async def fetch_archive_frame(
+        self, region: RegionDef, dt: datetime
+    ) -> np.ndarray | None:
+        """Fetch archived MRMS frame for a specific UTC datetime.
+
+        Scans the NCEP directory listing to find the file whose timestamp
+        is closest to the requested time.
+        """
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        url = await self._find_nearest_url(dt)
+        if url is not None:
+            return await self._fetch_and_parse(url, region)
+        return None
+
+    async def _find_nearest_url(self, target: datetime) -> str | None:
+        """Find the MRMS file whose timestamp is closest to *target*.
+
+        Fetches the NCEP directory listing (cached for 5 minutes), parses
+        the filenames to extract timestamps, and returns the URL of the
+        file closest to the target time.  Returns None if the directory
+        listing cannot be fetched or parsed.
+        """
+        await self._refresh_dir_cache()
+        if not self._dir_cache:
+            return None
+
+        target_ts = target.timestamp()
+        timestamps = [e[0].timestamp() for e in self._dir_cache]
+        idx = bisect.bisect_left(timestamps, target_ts)
+
+        if idx == 0:
+            best_idx = 0
+        elif idx == len(timestamps):
+            best_idx = len(timestamps) - 1
+        else:
+            before = timestamps[idx - 1]
+            after = timestamps[idx]
+            best_idx = idx - 1 if (target_ts - before) <= (after - target_ts) else idx
+
+        dt, filename = self._dir_cache[best_idx]
+        logger.debug(
+            "MRMS nearest to %s: %s (delta=%ds)",
+            target.strftime("%Y%m%d-%H%M%S"),
+            filename,
+            int(abs((target - dt).total_seconds())),
+        )
+        return f"{self._base_url}/{self._product}/{filename}"
+
+    async def _refresh_dir_cache(self) -> None:
+        """Fetch and parse the MRMS directory listing if stale.
+
+        Caches for 5 minutes to avoid hammering the server.
+        """
+        if self._dir_cache is not None and (time.time() - self._dir_cache_time) < 300:
+            return
+
+        url = f"{self._base_url}/{self._product}/"
+        try:
+            client = await self._get_client()
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                logger.warning("MRMS directory listing failed: HTTP %d", resp.status_code)
+                return
+        except Exception:
+            logger.exception("Error fetching MRMS directory listing")
+            return
+
+        entries: list[tuple[datetime, str]] = []
+        for match in self._TIMESTAMP_RE.finditer(resp.text):
+            ts_str = match.group(1)
+            try:
+                dt = datetime.strptime(ts_str, "%Y%m%d-%H%M%S").replace(
+                    tzinfo=timezone.utc
+                )
+                entries.append((dt, match.group(0)))
+            except ValueError:
+                continue
+
+        if not entries:
+            logger.warning("MRMS directory listing: no timestamps found")
+            return
+
+        entries.sort(key=lambda e: e[0])
+        self._dir_cache = entries
+        self._dir_cache_time = time.time()
+        logger.info(
+            "MRMS directory cache refreshed: %d files, %s to %s",
+            len(entries),
+            entries[0][0].strftime("%Y%m%d-%H%M%S"),
+            entries[-1][0].strftime("%Y%m%d-%H%M%S"),
+        )
+
+    _MAX_RETRIES = 1  # retry once on transient connection errors
+
+    async def _fetch_and_parse(
+        self, url: str, region: RegionDef
+    ) -> np.ndarray | None:
+        """Download a GRIB2.gz file, parse, crop and resample to region."""
+        for attempt in range(self._MAX_RETRIES + 1):
+            try:
+                client = await self._get_client()
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    logger.warning(
+                        "MRMS fetch failed: HTTP %d (%s)", resp.status_code, url
+                    )
+                    return None
+            except Exception:
+                if attempt < self._MAX_RETRIES:
+                    logger.info("MRMS fetch error, retrying: %s", url)
+                    await asyncio.sleep(1)
+                    continue
+                logger.exception("Error fetching MRMS %s", url)
+                return None
+
+            try:
+                ds = _parse_mrms_grib2(resp.content)
+            except EOFError:
+                # Truncated download (server dropped connection mid-stream).
+                # Retry the full download cycle once before giving up.
+                if attempt < self._MAX_RETRIES:
+                    logger.info(
+                        "MRMS gzip truncated, retrying download: %s", url
+                    )
+                    await asyncio.sleep(1)
+                    continue
+                logger.warning(
+                    "MRMS gzip truncated after %d retries: %s",
+                    self._MAX_RETRIES, url,
+                )
+                return None
+            except Exception:
+                logger.exception("Failed to parse MRMS GRIB2 from %s", url)
+                return None
+
+            if ds is None:
+                return None
+
+            return _resample_mrms_to_region(ds, region)
+
+        return None
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+        self._dir_cache = None
+
+
+def _parse_mrms_grib2(data: bytes) -> xr.Dataset | None:
+    """Decompress and parse an MRMS GRIB2 file into an xarray Dataset.
+
+    Returns a Dataset with latitude, longitude, and a single reflectivity
+    variable.  Returns None on any parse failure.
+
+    Raises:
+        EOFError: if the gzip stream is truncated (incomplete download).
+    """
+    try:
+        raw = gzip.decompress(data)
+    except EOFError:
+        # Truncated download — let the caller retry.  Don't log here so
+        # the retry logic in _fetch_and_parse can decide the message.
+        raise
+    except Exception:
+        logger.exception("Failed to decompress MRMS GRIB2")
+        return None
+
+    tmp = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix=".grib2", delete=False)
+        tmp.write(raw)
+        tmp.close()
+        # Suppress eccodes "truncating time" noise written directly to stderr.
+        with _suppress_eccodes_stderr():
+            ds = xr.open_dataset(tmp.name, engine="cfgrib")
+        # Force load into memory so the temp file can be deleted
+        ds = ds.compute()
+        return ds
+    except Exception:
+        logger.exception("Failed to parse MRMS GRIB2 with cfgrib")
+        return None
+    finally:
+        if tmp is not None:
+            try:
+                Path(tmp.name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _resample_mrms_to_region(
+    ds: xr.Dataset, region: RegionDef
+) -> np.ndarray:
+    """Crop and resample an MRMS Dataset to a region's lat/lon grid.
+
+    Steps:
+    1. Extract the reflectivity variable (first data var).
+    2. Slice the MRMS grid to the region's bounding box (with 1-cell
+       padding to avoid edge effects in nearest-neighbor sampling).
+    3. Replace -999.0 (MRMS no-data) with NaN.
+    4. Build target lat/lon axes from region bounds and pixel_size.
+    5. Resample via nearest-neighbor (upscale for USCOMP, downsample
+       for CACOMP) using numpy index mapping.
+    6. Convert float dBZ to uint8 using the shared ``_dbz_float_to_uint8``
+       encoder.
+    """
+    var_name = list(ds.data_vars)[0]
+    data = ds[var_name].values.astype(np.float32)
+
+    lats = ds.latitude.values  # north-to-south (54.99 → 20.01)
+    lons = ds.longitude.values  # west-to-east, may be 0-360 or -180-180
+
+    # Normalize longitude to -180..180 if needed
+    if lons.max() > 180:
+        lons = np.where(lons > 180, lons - 360, lons).astype(lons.dtype)
+
+    # Slice to region bbox with 1-cell padding
+    pad = 2  # extra cells beyond bbox for safety
+    south_idx = np.searchsorted(-lats, -region.south)  # lats are descending
+    north_idx = np.searchsorted(-lats, -region.north)
+    west_idx = np.searchsorted(lons, region.west)
+    east_idx = np.searchsorted(lons, region.east)
+
+    south_idx = max(0, south_idx - pad)
+    north_idx = min(len(lats), north_idx + pad)
+    west_idx = max(0, west_idx - pad)
+    east_idx = min(len(lons), east_idx + pad)
+
+    data = data[north_idx:south_idx, west_idx:east_idx]
+    lats = lats[north_idx:south_idx]
+    lons = lons[west_idx:east_idx]
+
+    # Build target grid axes.
+    # Target lats go north-to-south (descending) so that row 0 of the
+    # output array corresponds to the northernmost pixel, matching the
+    # coordinate convention used by the renderer:
+    #   row = (region.north - lat) / pixel_size_y
+    # Pixel centers are offset by half a pixel from the grid edge.
+    target_ps = region.pixel_size
+    target_ps_y = region._ps_y
+    north_center = region.north - target_ps_y / 2
+    south_center = region.south + target_ps_y / 2
+    target_lats = np.linspace(north_center, south_center, region.height)
+    target_lons = np.arange(region.west, region.east, target_ps)
+
+    if len(target_lats) == 0 or len(target_lons) == 0:
+        logger.warning("MRMS resample: empty target grid for %s", region.name)
+        return np.zeros((region.height, region.width), dtype=np.uint8)
+
+    # Nearest-neighbor resampling: map each target pixel to the closest
+    # source pixel.  Both source and target lats are north-to-south
+    # (descending), so negating gives ascending arrays suitable for
+    # searchsorted.
+    target_lat_rows = np.searchsorted(-lats, -target_lats)
+    target_lat_rows = np.clip(target_lat_rows, 0, len(lats) - 1)
+
+    target_lon_cols = np.searchsorted(lons, target_lons)
+    target_lon_cols = np.clip(target_lon_cols, 0, len(lons) - 1)
+
+    # Index into the cropped data array
+    resampled = data[target_lat_rows[:, None], target_lon_cols[None, :]]
+
+    # Replace MRMS no-data (-999.0) with NaN before encoding
+    resampled = np.where(resampled < -900, np.nan, resampled)
+
+    # Convert to uint8 using shared encoder (NaN → -33 → 0)
+    resampled = np.where(np.isnan(resampled), -33.0, resampled)
+    return _dbz_float_to_uint8(resampled)
 
 

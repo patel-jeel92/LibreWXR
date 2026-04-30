@@ -27,8 +27,17 @@ class Settings(BaseSettings):
     warm_coord_zoom: int = 6  # Pre-warm coordinate caches up to this zoom (0 = disable)
     warm_overview_zoom: int = 4  # Pre-render tiles up to this zoom on each fetch (set to -1 to disable)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
+    # North American radar data source.  Three modes:
+    #   mrms_fallback  - (default) MRMS primary + IEM fallback for USCOMP + MSC
+    #                    blending for CACOMP.  Best coverage, slightly more bandwidth.
+    #   mrms           - MRMS only, no fallback/blending.  Pure MRMS where available,
+    #                    gaps show as empty (IFS fills in).  Least bandwidth.
+    #   iem            - Legacy IEM N0Q for USCOMP, MSC standalone for CACOMP.
+    #                    NEXRAD-only, no Canadian radar ingest.
+    na_source: str = "mrms_fallback"
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
     msc_canada_base_url: str = "https://geo.weather.gc.ca"
+    mrms_base_url: str = "https://mrms.ncep.noaa.gov/2D"
     opera_base_url: str = "https://s3.waw3-1.cloudferro.com"
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"

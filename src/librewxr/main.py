@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from rich.logging import RichHandler
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
@@ -19,6 +20,7 @@ from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
+from librewxr.data.radar_stations import MRMS_STATIONS
 from librewxr.data.store import FrameStore
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
@@ -37,8 +39,14 @@ from librewxr.tiles.warmer import TileWarmer
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    format="%(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
 )
+# Suppress noisy per-request INFO logs from httpx/httpcore — we already log
+# fetch results ourselves in sources.py / fetcher.py.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +73,14 @@ async def lifespan(app: FastAPI):
 
     # Precompute radar station coverage masks used by the ECMWF fallback
     # to distinguish "outside radar range" from "clear sky within range".
-    build_coverage_masks()
+    # When MRMS is the NA source, use combined NEXRAD+Canada stations since
+    # MRMS ingests both networks — this gives correct coverage for USCOMP
+    # and CACOMP.  When IEM is the source, use the default per-region
+    # stations (NEXRAD-only for USCOMP, Canada-only for CACOMP).
+    coverage_overrides = None
+    if settings.na_source in ("mrms", "mrms_fallback"):
+        coverage_overrides = MRMS_STATIONS
+    build_coverage_masks(station_overrides=coverage_overrides)
     build_feather_masks()
 
     # Nowcast store and generator

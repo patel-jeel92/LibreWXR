@@ -75,9 +75,20 @@ def _build_region_mask(region: RegionDef, stations: list[tuple[float, float]]) -
     )
 
 
-def build_coverage_masks() -> None:
-    """Build coverage masks for every region with known stations."""
+def build_coverage_masks(
+    station_overrides: dict[str, list[tuple[float, float]]] | None = None,
+) -> None:
+    """Build coverage masks for every region with known stations.
+
+    Args:
+        station_overrides: Optional mapping of region name to a custom
+            station list. When provided, these override the default
+            REGION_STATIONS entries. Used when MRMS is the active source
+            for USCOMP/CACOMP (which combines NEXRAD + Canadian stations).
+    """
     for region_name, stations in REGION_STATIONS.items():
+        if station_overrides and region_name in station_overrides:
+            stations = station_overrides[region_name]
         region = REGIONS.get(region_name)
         if region is None:
             continue
