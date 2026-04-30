@@ -30,7 +30,8 @@ services:
           # CONUS only, 1 worker (any source):
           #   12 frames: ~3 GB
           #   20 frames: ~4 GB
-          memory: 7G
+          # Override in .env: LIBREWXR_MEMORY=4G
+          memory: ${LIBREWXR_MEMORY:-7G}
 
 volumes:
   librewxr-cache:

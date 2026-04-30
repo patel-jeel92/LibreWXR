@@ -28,6 +28,11 @@
 # Cron example (hourly, logging to /var/log/librewxr-update.log):
 #   0 * * * * /path/to/LibreWXR/scripts/auto-update.sh \
 #             >> /var/log/librewxr-update.log 2>&1
+#
+# Note: if you need to customise docker-compose.yml (e.g. memory limits),
+# set the corresponding LIBREWXR_* variables in .env instead of editing
+# the file directly — the auto-updater refuses to run on a dirty working
+# tree, and .env is already in .gitignore.
 
 set -euo pipefail
 
