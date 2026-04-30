@@ -19,6 +19,7 @@ from librewxr.config import settings
 from librewxr.data.store import FrameStore
 from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
+from librewxr.tiles.coordinates import coord_cache_bytes
 from librewxr.tiles.renderer import render_coverage_tile, render_tile
 from librewxr.tiles.satellite_renderer import render_satellite_tile
 
@@ -57,7 +58,8 @@ async def health():
     ecmwf_bytes = ecmwf_grid.data_bytes if ecmwf_grid else 0
     nowcast_bytes = nowcast_store.data_bytes if nowcast_store else 0
     satellite_bytes = cloud_grid.data_bytes if cloud_grid else 0
-    tracked_bytes = radar_bytes + tile_cache_bytes + ecmwf_bytes + nowcast_bytes + satellite_bytes
+    coord_bytes = coord_cache_bytes()
+    tracked_bytes = radar_bytes + tile_cache_bytes + ecmwf_bytes + nowcast_bytes + satellite_bytes + coord_bytes
     other_bytes = max(0, rss_bytes - tracked_bytes)
 
     return {
@@ -73,6 +75,7 @@ async def health():
                 "ecmwf_grid_mb": round(ecmwf_bytes / (1024 * 1024), 1),
                 "nowcast_mb": round(nowcast_bytes / (1024 * 1024), 1),
                 "satellite_mb": round(satellite_bytes / (1024 * 1024), 1),
+                "coord_caches_mb": round(coord_bytes / (1024 * 1024), 1),
                 "other_mb": round(other_bytes / (1024 * 1024), 1),
             },
         },

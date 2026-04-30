@@ -258,15 +258,17 @@ def tile_pixel_latlons(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute lat/lon for each pixel in a Web Mercator tile.
 
-    Returns (lat_grid, lon_grid) float64 arrays of shape (tile_size, tile_size).
+    Returns (lat_grid, lon_grid) float32 arrays of shape (tile_size, tile_size).
     Used for temperature lookups that need geographic coordinates.
+    float32 provides ~7 decimal digits (~0.00001° ≈ 1 m precision),
+    far exceeding any radar data resolution.
     """
     n = 2**z
-    cx = np.arange(tile_size, dtype=np.float64) + 0.5
-    cy = np.arange(tile_size, dtype=np.float64) + 0.5
+    cx = np.arange(tile_size, dtype=np.float32) + 0.5
+    cy = np.arange(tile_size, dtype=np.float32) + 0.5
 
     lon = (x + cx / tile_size) / n * 360.0 - 180.0
-    lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
+    lat_rad = np.arctan(np.sinh(np.float32(math.pi) * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
     lon_grid, lat_grid = np.meshgrid(lon, lat)
@@ -281,11 +283,11 @@ def tile_pixel_latlons_padded(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute lat/lon for a tile with padding."""
     n = 2**z
-    cx = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
-    cy = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
+    cx = np.arange(-pad, tile_size + pad, dtype=np.float32) + 0.5
+    cy = np.arange(-pad, tile_size + pad, dtype=np.float32) + 0.5
 
     lon = (x + cx / tile_size) / n * 360.0 - 180.0
-    lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
+    lat_rad = np.arctan(np.sinh(np.float32(math.pi) * (1 - 2 * (y + cy / tile_size) / n)))
     lat = np.degrees(lat_rad)
 
     lon_grid, lat_grid = np.meshgrid(lon, lat)
@@ -373,3 +375,49 @@ def warm_coordinate_caches(
                     region_pixel_indices_fractional(region, z, x, y, tile_size)
                     warmed += 1
     return warmed
+
+
+# All decorated coordinate cache functions (for bulk clear / size queries).
+# Legacy wrappers (tile_pixel_indices, etc.) are excluded because they
+# delegate to the corresponding region_pixel_* function and thus share
+# the same underlying numpy arrays — counting them would double-count.
+ALL_CACHES = [
+    region_pixel_indices,
+    region_pixel_indices_padded,
+    region_pixel_indices_fractional,
+    tile_pixel_latlons,
+    tile_pixel_latlons_padded,
+]
+
+# Per-cache estimate of how many bytes each cached result tuple consumes.
+# Calculated as: 2 arrays × dtype_size × rows × cols.
+# Defaults assume tile_size=256, pad=8 (padded: 272).
+_CACHE_ENTRY_BYTES = {
+    # region_pixel_indices: 2 × int32 × 256 × 256
+    region_pixel_indices: 2 * 4 * 256 * 256,
+    # region_pixel_indices_padded: 2 × int32 × 272 × 272
+    region_pixel_indices_padded: 2 * 4 * 272 * 272,
+    # region_pixel_indices_fractional: 2 × float32 × 256 × 256
+    region_pixel_indices_fractional: 2 * 4 * 256 * 256,
+    # tile_pixel_latlons: 2 × float32 × 256 × 256
+    tile_pixel_latlons: 2 * 4 * 256 * 256,
+    # tile_pixel_latlons_padded: 2 × float32 × 272 × 272
+    tile_pixel_latlons_padded: 2 * 4 * 272 * 272,
+}
+
+
+def coord_cache_bytes() -> int:
+    """Estimate total memory consumed by all coordinate LRU caches.
+
+    Uses ``lru_cache.cache_info().currsize`` (number of populated entries)
+    multiplied by the per-entry byte cost of each cache's return value.
+
+    This is an approximation — entries called with non-default tile_size
+    or pad values will have different sizes, but the vast majority of
+    calls use the defaults (256 / 8).
+    """
+    total = 0
+    for fn in ALL_CACHES:
+        info = fn.cache_info()
+        total += info.currsize * _CACHE_ENTRY_BYTES[fn]
+    return total

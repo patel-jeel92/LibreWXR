@@ -25,14 +25,7 @@ from librewxr.data.store import FrameStore
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import (
-    region_pixel_indices,
-    region_pixel_indices_fractional,
-    region_pixel_indices_padded,
-    tile_pixel_indices,
-    tile_pixel_indices_fractional,
-    tile_pixel_indices_padded,
-    tile_pixel_latlons,
-    tile_pixel_latlons_padded,
+    ALL_CACHES,
     warm_coordinate_caches,
 )
 from librewxr.tiles.warmer import TileWarmer
@@ -52,14 +45,8 @@ logger = logging.getLogger(__name__)
 
 def _clear_coord_caches() -> None:
     """Clear all coordinate LRU caches."""
-    region_pixel_indices.cache_clear()
-    region_pixel_indices_padded.cache_clear()
-    region_pixel_indices_fractional.cache_clear()
-    tile_pixel_latlons.cache_clear()
-    tile_pixel_latlons_padded.cache_clear()
-    tile_pixel_indices.cache_clear()
-    tile_pixel_indices_padded.cache_clear()
-    tile_pixel_indices_fractional.cache_clear()
+    for fn in ALL_CACHES:
+        fn.cache_clear()
     logger.info("Coordinate caches cleared by memory monitor")
 
 
