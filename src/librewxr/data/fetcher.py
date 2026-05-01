@@ -14,10 +14,8 @@ from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import (
     IEMSource,
-    MRMS_SOUTH,
-    MRMS_NORTH,
-    MRMS_WEST,
-    MRMS_EAST,
+    MRMS_EXTENTS,
+    MRMS_PRODUCTS,
     MRMSSource,
     MSCCanadaSource,
     OperaSource,
@@ -43,14 +41,19 @@ class RadarFetcher:
         ecmwf_grid: ECMWFGrid | None = None,
         cloud_grid: CloudGrid | None = None,
         nowcast_generator=None,
+        warmer=None,
+        radar_cache=None,
     ):
         self._store = store
         self._cache = cache
         self._ecmwf_grid = ecmwf_grid
         self._cloud_grid = cloud_grid
         self._nowcast_generator = nowcast_generator
+        self._warmer = warmer
+        self._radar_cache = radar_cache
         self._task: asyncio.Task | None = None
         self._cloud_task: asyncio.Task | None = None
+        self._warm_task: asyncio.Task | None = None
         self._enabled_regions = [
             REGIONS[name] for name in settings.get_enabled_regions()
         ]
@@ -66,16 +69,21 @@ class RadarFetcher:
         iem_source: IEMSource | None = None
         canada_source: MSCCanadaSource | None = None
         opera_source: OperaSource | None = None
+        # Keyed by MRMS product path so regions sharing a product (e.g.
+        # USCOMP and CACOMP both use the bare CONUS path) share one
+        # MRMSSource — one HTTP client, one directory cache, one GRIB2
+        # download per fetch cycle.
         mrms_sources: dict[str, MRMSSource] = {}
 
         use_mrms = self._na_source in ("mrms", "mrms_fallback")
         for region in self._enabled_regions:
             if use_mrms and region.name in self._MRMS_REGIONS:
-                if region.name not in mrms_sources:
-                    mrms_sources[region.name] = MRMSSource(
+                product = MRMS_PRODUCTS[region.name]
+                if product not in mrms_sources:
+                    mrms_sources[product] = MRMSSource(
                         settings.mrms_base_url, region_name=region.name
                     )
-                self._sources[region.name] = mrms_sources[region.name]
+                self._sources[region.name] = mrms_sources[product]
             elif region.group == "CANADA":
                 if canada_source is None:
                     canada_source = MSCCanadaSource(settings.msc_canada_base_url)
@@ -105,6 +113,12 @@ class RadarFetcher:
             for r in self._enabled_regions
         ):
             self._iem_fallback = IEMSource(settings.iem_base_url)
+
+        # Tracks last-known availability of MSC Canada blending so we can
+        # log on state change instead of per blend call (backfill would
+        # otherwise spam an identical WARNING for every historical frame).
+        # None = not yet observed; True/False = last seen state.
+        self._cacomp_msc_available: bool | None = None
 
     async def start(self) -> None:
         """Start the background fetch loop.
@@ -152,6 +166,7 @@ class RadarFetcher:
         try:
             await self._fetch_all_frames()
             await self._run_nowcast()
+            self._schedule_warm()
         except Exception:
             logger.exception("Error in initial backfill")
         release_memory()
@@ -164,9 +179,31 @@ class RadarFetcher:
             try:
                 await self._fetch_all_frames()
                 await self._run_nowcast()
+                self._schedule_warm()
             except Exception:
                 logger.exception("Error in fetch loop")
             release_memory()
+
+    def _schedule_warm(self) -> None:
+        """Pre-render overview tiles for any new frames in the background.
+
+        Idempotent: ``warm_overview`` short-circuits on already-cached tiles,
+        so re-running every cycle only spends real work on the 1–2 new
+        timestamps that just arrived. Skip if a previous warm pass is still
+        running so cycles can't pile up under load.
+        """
+        if self._warmer is None or settings.warm_overview_zoom < 0:
+            return
+        if self._warm_task is not None and not self._warm_task.done():
+            logger.debug("Warm pass still running, skipping this cycle")
+            return
+        self._warm_task = asyncio.create_task(
+            self._warmer.warm_overview(
+                ecmwf_grid=self._ecmwf_grid,
+                max_zoom=settings.warm_overview_zoom,
+                max_zoom_regional=settings.warm_overview_zoom_regional,
+            )
+        )
 
     async def _fetch_initial(self) -> None:
         """Quick startup: fetch auxiliary grids and latest radar frame only."""
@@ -336,7 +373,21 @@ class RadarFetcher:
                 # Region data was merged into an existing frame — flush
                 # stale tiles that were rendered without the new regions.
                 self._cache.invalidate_timestamp(ts)
+            if self._radar_cache is not None:
+                try:
+                    self._radar_cache.write_frame(frame)
+                except Exception:
+                    logger.exception("Failed to persist radar frame %d", ts)
             added += 1
+
+        if self._radar_cache is not None and frames_by_ts:
+            try:
+                active_ts = await self._store.get_timestamps()
+                self._radar_cache.cleanup(active_ts)
+                regions_by_name = {r.name: r for r in self._enabled_regions}
+                self._radar_cache.save_metadata(regions_by_name, active_ts)
+            except Exception:
+                logger.exception("Failed to update radar cache metadata")
 
         count = await self._store.frame_count()
         region_summary = ", ".join(
@@ -413,32 +464,30 @@ class RadarFetcher:
                 logger.exception("MSC Canada fetch failed during CACOMP blend")
 
         if msc_data is None:
-            logger.warning("CACOMP: MSC data unavailable, using MRMS only")
+            if self._cacomp_msc_available is not False:
+                logger.warning("CACOMP: MSC data unavailable, using MRMS only")
+                self._cacomp_msc_available = False
             return mrms_data
 
-        # Build the MRMS extent mask at the region's pixel resolution
+        if self._cacomp_msc_available is False:
+            logger.info("CACOMP: MSC data available again, resuming blend")
+        self._cacomp_msc_available = True
+
+        # Build the MRMS extent mask at the region's pixel resolution.
         # Lats go north-to-south (row 0 = northernmost pixel) to match
         # the data array convention used by the renderer.
-        ps = region.pixel_size
         ps_y = region._ps_y
         north_center = region.north - ps_y / 2
         south_center = region.south + ps_y / 2
         lats = np.linspace(north_center, south_center, region.height)
-        lons = np.arange(region.west, region.east, ps)
+        lons = np.arange(region.west, region.east, region.pixel_size)
 
-        # Ensure shapes match (region might compute slightly different dims)
-        if lats.shape[0] != mrms_data.shape[0] or lons.shape[0] != mrms_data.shape[1]:
-            # Fall back to MRMS shape if there's a mismatch
-            h, w = mrms_data.shape
-            lats = np.linspace(region.north, region.south, h, endpoint=False) + ps_y / 2
-            lons = np.linspace(region.west, region.east, w, endpoint=False)
-
-        # Pixel-level mask: True where MRMS has data (within its extent)
+        mrms_south, mrms_north, mrms_west, mrms_east = MRMS_EXTENTS["USCOMP"]
         mrms_extent_mask = (
-            (lats[:, None] >= MRMS_SOUTH) &
-            (lats[:, None] <= MRMS_NORTH) &
-            (lons[None, :] >= MRMS_WEST) &
-            (lons[None, :] <= MRMS_EAST)
+            (lats[:, None] >= mrms_south) &
+            (lats[:, None] <= mrms_north) &
+            (lons[None, :] >= mrms_west) &
+            (lons[None, :] <= mrms_east)
         )
 
         # Blend: start with MSC, overlay MRMS where available

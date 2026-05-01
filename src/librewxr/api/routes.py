@@ -19,8 +19,9 @@ from librewxr.config import settings
 from librewxr.data.store import FrameStore
 from librewxr.memory import detect_memory_limit_mb
 from librewxr.tiles.cache import TileCache
-from librewxr.tiles.coordinates import coord_cache_bytes
+from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
 from librewxr.tiles.renderer import render_coverage_tile, render_tile
+from librewxr.tiles.request_tracker import TileRequestTracker
 from librewxr.tiles.satellite_renderer import render_satellite_tile
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ ecmwf_grid = None  # ECMWFGrid | None
 cloud_grid = None  # CloudGrid | None
 tile_warmer = None  # TileWarmer | None
 nowcast_store = None  # NowcastStore | None
+radar_cache = None  # RadarFrameCache | None
+radar_fetcher = None  # RadarFetcher | None
+tile_request_tracker: TileRequestTracker | None = None
 start_time: float = 0.0
 enabled_regions: list[str] | None = None
 
@@ -51,6 +55,16 @@ async def health():
     timestamps = await frame_store.get_timestamps()
     latest_ts = max(timestamps) if timestamps else None
     oldest_ts = min(timestamps) if timestamps else None
+
+    # Per-region frame counts catch silent regional failures: if OPERA
+    # falls behind while USCOMP keeps fetching, the totals diverge here.
+    region_keys = await frame_store.get_region_keys()
+    per_region_counts: dict[str, int] = {}
+    for names in region_keys.values():
+        for name in names:
+            per_region_counts[name] = per_region_counts.get(name, 0) + 1
+    for name in (enabled_regions or []):
+        per_region_counts.setdefault(name, 0)
 
     # Per-component memory breakdown
     radar_bytes = frame_store.data_bytes
@@ -85,6 +99,7 @@ async def health():
             "latest": latest_ts,
             "oldest": oldest_ts,
             "latest_age_seconds": now - latest_ts if latest_ts else None,
+            "per_region": per_region_counts,
         },
         "tile_cache": {
             "entries": tile_cache.size,
@@ -108,6 +123,28 @@ async def health():
             "timesteps": cloud_grid.timestep_count if cloud_grid else 0,
         },
         "enabled_regions": enabled_regions or [],
+        "sources": {
+            "na_source": settings.na_source,
+            # CACOMP MSC blending state: True/False once observed,
+            # None if blending isn't configured for this region set.
+            "cacomp_msc_blending": (
+                radar_fetcher._cacomp_msc_available
+                if radar_fetcher is not None
+                and radar_fetcher._cacomp_msc_source is not None
+                else None
+            ),
+        },
+        "radar_cache": (
+            {"enabled": True, **radar_cache.stats()}
+            if radar_cache is not None
+            else {"enabled": False}
+        ),
+        "coord_caches": coord_cache_stats(),
+        "tile_requests": (
+            {"enabled": True, **tile_request_tracker.stats()}
+            if tile_request_tracker is not None
+            else {"enabled": False}
+        ),
     }
 
 
@@ -175,6 +212,9 @@ async def radar_tile(
     max_tiles = 2**z
     if x >= max_tiles or y >= max_tiles:
         raise HTTPException(status_code=400, detail="Tile coordinates out of range")
+
+    if tile_request_tracker is not None:
+        tile_request_tracker.record(z, x, y)
 
     parts = smooth_snow.split("_")
     smooth = parts[0] == "1"

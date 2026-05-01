@@ -545,13 +545,6 @@ MRMS_EXTENTS: dict[str, tuple[float, float, float, float]] = {
     "GUCOMP": (9.002, 17.997, 140.002, 149.998),
 }
 
-# Kept for backward compat with CACOMP blending code
-MRMS_SOUTH = 20.005
-MRMS_NORTH = 54.995
-MRMS_WEST = -129.995
-MRMS_EAST = -60.005
-
-
 class MRMSSource:
     """NOAA MRMS MergedReflectivityQCComposite source.
 
@@ -584,6 +577,9 @@ class MRMSSource:
         # Refreshed once per fetch cycle.
         self._dir_cache: list[tuple[datetime, str]] | None = None
         self._dir_cache_time: float = 0.0
+        # Serialises refreshes so parallel backfill coroutines don't each
+        # issue their own HTTP fetch when the cache is cold or stale.
+        self._dir_cache_lock = asyncio.Lock()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -683,46 +679,54 @@ class MRMSSource:
     async def _refresh_dir_cache(self) -> None:
         """Fetch and parse the MRMS directory listing if stale.
 
-        Caches for 5 minutes to avoid hammering the server.
+        Caches for 5 minutes to avoid hammering the server. Uses
+        double-checked locking so parallel backfill coroutines coalesce
+        into a single HTTP fetch instead of each refreshing on their own.
         """
         if self._dir_cache is not None and (time.time() - self._dir_cache_time) < 300:
             return
 
-        url = f"{self._base_url}/{self._product}/"
-        try:
-            client = await self._get_client()
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning("MRMS directory listing failed: HTTP %d", resp.status_code)
+        async with self._dir_cache_lock:
+            # Re-check under the lock: another coroutine may have already
+            # refreshed while we were waiting.
+            if self._dir_cache is not None and (time.time() - self._dir_cache_time) < 300:
                 return
-        except Exception:
-            logger.exception("Error fetching MRMS directory listing")
-            return
 
-        entries: list[tuple[datetime, str]] = []
-        for match in self._TIMESTAMP_RE.finditer(resp.text):
-            ts_str = match.group(1)
+            url = f"{self._base_url}/{self._product}/"
             try:
-                dt = datetime.strptime(ts_str, "%Y%m%d-%H%M%S").replace(
-                    tzinfo=timezone.utc
-                )
-                entries.append((dt, match.group(0)))
-            except ValueError:
-                continue
+                client = await self._get_client()
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    logger.warning("MRMS directory listing failed: HTTP %d", resp.status_code)
+                    return
+            except Exception:
+                logger.exception("Error fetching MRMS directory listing")
+                return
 
-        if not entries:
-            logger.warning("MRMS directory listing: no timestamps found")
-            return
+            entries: list[tuple[datetime, str]] = []
+            for match in self._TIMESTAMP_RE.finditer(resp.text):
+                ts_str = match.group(1)
+                try:
+                    dt = datetime.strptime(ts_str, "%Y%m%d-%H%M%S").replace(
+                        tzinfo=timezone.utc
+                    )
+                    entries.append((dt, match.group(0)))
+                except ValueError:
+                    continue
 
-        entries.sort(key=lambda e: e[0])
-        self._dir_cache = entries
-        self._dir_cache_time = time.time()
-        logger.info(
-            "MRMS directory cache refreshed: %d files, %s to %s",
-            len(entries),
-            entries[0][0].strftime("%Y%m%d-%H%M%S"),
-            entries[-1][0].strftime("%Y%m%d-%H%M%S"),
-        )
+            if not entries:
+                logger.warning("MRMS directory listing: no timestamps found")
+                return
+
+            entries.sort(key=lambda e: e[0])
+            self._dir_cache = entries
+            self._dir_cache_time = time.time()
+            logger.info(
+                "MRMS directory cache refreshed: %d files, %s to %s",
+                len(entries),
+                entries[0][0].strftime("%Y%m%d-%H%M%S"),
+                entries[-1][0].strftime("%Y%m%d-%H%M%S"),
+            )
 
     _MAX_RETRIES = 1  # retry once on transient connection errors
 

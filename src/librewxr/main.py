@@ -28,13 +28,48 @@ from librewxr.tiles.coordinates import (
     ALL_CACHES,
     warm_coordinate_caches,
 )
+from librewxr.tiles.request_tracker import TileRequestTracker
 from librewxr.tiles.warmer import TileWarmer
 
+# Map dotted logger names to short subsystem tags so concurrent startup
+# (radar / IFS / cloud all firing in parallel) reads cleanly in the log.
+# Anything not in the map falls back to the last segment of the module
+# path (e.g. an unmapped third-party logger keeps its own short name).
+_LOG_TAGS = {
+    "librewxr.main": "main",
+    "librewxr.config": "config",
+    "librewxr.memory": "memory",
+    "librewxr.api.routes": "api",
+    "librewxr.data.sources": "radar",
+    "librewxr.data.fetcher": "fetcher",
+    "librewxr.data.store": "store",
+    "librewxr.data.regions": "regions",
+    "librewxr.data.coverage": "coverage",
+    "librewxr.data.ecmwf_grid": "ifs",
+    "librewxr.data.ecmwf_interpolation": "ifs",
+    "librewxr.data.cloud_grid": "cloud",
+    "librewxr.data.cloud_cache": "cloud",
+    "librewxr.data.nowcast": "nowcast",
+    "librewxr.tiles.warmer": "warmer",
+    "librewxr.tiles.cache": "tiles",
+    "librewxr.tiles.renderer": "tiles",
+    "librewxr.tiles.satellite_renderer": "tiles",
+    "librewxr.tiles.coordinates": "tiles",
+}
+
+
+class _TagFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        record.tag = _LOG_TAGS.get(record.name, record.name.rsplit(".", 1)[-1])
+        return super().format(record)
+
+
+_handler = RichHandler(rich_tracebacks=True, show_path=False)
+_handler.setFormatter(_TagFormatter("[%(tag)s] %(message)s"))
 logging.basicConfig(
     level=logging.INFO,
-    format="%(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
+    handlers=[_handler],
+    force=True,
 )
 # Suppress noisy per-request INFO logs from httpx/httpcore — we already log
 # fetch results ourselves in sources.py / fetcher.py.
@@ -104,6 +139,15 @@ async def lifespan(app: FastAPI):
         check_interval=settings.memory_pressure_check_interval,
     )
 
+    tile_request_tracker = (
+        TileRequestTracker(
+            min_zoom=settings.tile_tracking_min_zoom,
+            max_entries=settings.tile_tracking_max_entries,
+        )
+        if settings.tile_tracking_enabled
+        else None
+    )
+
     # Wire up the shared state
     routes.frame_store = store
     routes.tile_cache = cache
@@ -111,15 +155,40 @@ async def lifespan(app: FastAPI):
     routes.cloud_grid = cloud
     routes.tile_warmer = warmer
     routes.nowcast_store = nowcast_store
+    routes.tile_request_tracker = tile_request_tracker
     routes.start_time = time.time()
     routes.enabled_regions = enabled
+
+    radar_cache = None
+    if settings.cache_dir:
+        from pathlib import Path
+
+        from librewxr.data.radar_cache import RadarFrameCache
+        from librewxr.data.regions import REGIONS
+
+        radar_cache = RadarFrameCache(Path(settings.cache_dir))
+        regions_by_name = {name: REGIONS[name] for name in enabled}
+        restored = radar_cache.load_frames(regions_by_name)
+        if restored:
+            for frame in restored:
+                await store.add_frame(frame)
+            logger.info(
+                "Restored %d radar frame(s) from disk cache (%d → %d)",
+                len(restored),
+                restored[0].timestamp,
+                restored[-1].timestamp,
+            )
 
     fetcher = RadarFetcher(
         store, cache,
         ecmwf_grid=ecmwf_grid,
         cloud_grid=cloud,
         nowcast_generator=nowcast_generator,
+        warmer=warmer,
+        radar_cache=radar_cache,
     )
+    routes.radar_cache = radar_cache
+    routes.radar_fetcher = fetcher
     logger.info(
         "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s, "
         "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s, satellite=%s, "
@@ -153,12 +222,14 @@ async def lifespan(app: FastAPI):
         )
 
     # Pre-render overview tiles in the background so zoomed-out views are
-    # served instantly from cache.
+    # served instantly from cache.  The fetcher re-triggers this after each
+    # fetch cycle so newly-arrived frames are warmed automatically.
     if settings.warm_overview_zoom >= 0:
         asyncio.create_task(
             warmer.warm_overview(
                 ecmwf_grid=ecmwf_grid,
                 max_zoom=settings.warm_overview_zoom,
+                max_zoom_regional=settings.warm_overview_zoom_regional,
             )
         )
 

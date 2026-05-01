@@ -7,6 +7,9 @@ import pytest
 
 pytestmark = pytest.mark.store
 
+from librewxr.data.fetcher import RadarFetcher
+from librewxr.data.radar_cache import RadarFrameCache
+from librewxr.data.regions import RegionDef
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import COMPOSITE_HEIGHT, COMPOSITE_WIDTH
@@ -141,3 +144,115 @@ class TestTileCache:
         assert cache.get((2,)) is None
         assert cache.get((3,)) == b"ccc"
         assert cache.get((4,)) == b"ddd"
+
+
+class _FakeSource:
+    """Returns a deterministic uint8 array sized to the region grid."""
+
+    def __init__(self):
+        self.live_calls: list[tuple[str, int]] = []
+        self.archive_calls: list[tuple[str, int]] = []
+
+    async def fetch_frame(self, region, minutes_ago):
+        self.live_calls.append((region.name, minutes_ago))
+        return np.full((region.height, region.width), 50, dtype=np.uint8)
+
+    async def fetch_archive_frame(self, region, dt):
+        self.archive_calls.append((region.name, int(dt.timestamp())))
+        return np.full((region.height, region.width), 50, dtype=np.uint8)
+
+
+def _build_fetcher(store, tile_cache, radar_cache, region):
+    """Bypass __init__ so we don't drag in real source dispatch / settings."""
+    fetcher = RadarFetcher.__new__(RadarFetcher)
+    fetcher._store = store
+    fetcher._cache = tile_cache
+    fetcher._ecmwf_grid = None
+    fetcher._cloud_grid = None
+    fetcher._nowcast_generator = None
+    fetcher._warmer = None
+    fetcher._radar_cache = radar_cache
+    fetcher._task = None
+    fetcher._cloud_task = None
+    fetcher._warm_task = None
+    fetcher._enabled_regions = [region]
+    fetcher._na_source = "iem"
+    source = _FakeSource()
+    fetcher._sources = {region.name: source}
+    fetcher._cacomp_msc_source = None
+    fetcher._iem_fallback = None
+    fetcher._cacomp_msc_available = None
+    return fetcher, source
+
+
+class TestFetcherRadarCacheWiring:
+    @pytest.fixture
+    def small_region(self):
+        # Explicit grid_width/height keeps arrays tiny so despeckle's
+        # neighbor scan stays cheap even with the default min_neighbors=3.
+        return RegionDef(
+            name="TESTREG",
+            west=0.0, east=3.2, south=0.0, north=3.2,
+            pixel_size=0.1, group="US",
+            grid_width=32, grid_height=32,
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetcher_persists_frames_to_radar_cache(
+        self, tmp_path, small_region
+    ):
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        radar_cache = RadarFrameCache(tmp_path)
+        fetcher, source = _build_fetcher(store, tile_cache, radar_cache, small_region)
+
+        await fetcher._fetch_timestamps([
+            (1000, "live", 0),
+            (2000, "live", 10),
+        ])
+
+        # .dat files should exist for both timestamps.
+        assert (tmp_path / "radar" / "radar_1000_TESTREG.dat").exists()
+        assert (tmp_path / "radar" / "radar_2000_TESTREG.dat").exists()
+        # metadata.json should record both timestamps and the region shape.
+        meta_path = tmp_path / "radar" / "metadata.json"
+        assert meta_path.exists()
+        import json
+        meta = json.loads(meta_path.read_text())
+        assert sorted(meta["timestamps"]) == [1000, 2000]
+        assert meta["regions"]["TESTREG"]["shape"] == [32, 32]
+
+    @pytest.mark.asyncio
+    async def test_fetcher_cleanup_removes_evicted_timestamps(
+        self, tmp_path, small_region
+    ):
+        # max_frames=2 forces the oldest timestamp to be evicted on the
+        # third write; cache.cleanup should follow the store's lead and
+        # delete the corresponding .dat file.
+        store = FrameStore(max_frames=2)
+        tile_cache = TileCache(max_mb=1)
+        radar_cache = RadarFrameCache(tmp_path)
+        fetcher, _source = _build_fetcher(store, tile_cache, radar_cache, small_region)
+
+        await fetcher._fetch_timestamps([(1000, "live", 0)])
+        await fetcher._fetch_timestamps([(2000, "live", 10)])
+        await fetcher._fetch_timestamps([(3000, "live", 20)])
+
+        # Store should hold only the newest two; cache should match.
+        assert sorted(await store.get_timestamps()) == [2000, 3000]
+        assert not (tmp_path / "radar" / "radar_1000_TESTREG.dat").exists()
+        assert (tmp_path / "radar" / "radar_2000_TESTREG.dat").exists()
+        assert (tmp_path / "radar" / "radar_3000_TESTREG.dat").exists()
+
+    @pytest.mark.asyncio
+    async def test_fetcher_without_radar_cache_does_not_crash(
+        self, tmp_path, small_region
+    ):
+        # When cache_dir is unset in production, _radar_cache is None;
+        # _fetch_timestamps should still drive the store cleanly.
+        store = FrameStore(max_frames=2)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, _source = _build_fetcher(store, tile_cache, None, small_region)
+
+        await fetcher._fetch_timestamps([(1000, "live", 0)])
+        assert await store.get_timestamps() == [1000]

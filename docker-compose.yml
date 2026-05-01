@@ -7,6 +7,12 @@ services:
       - .env
     environment:
       LIBREWXR_CACHE_DIR: /data/cache
+      # Uncomment when regional NWP models land (see
+      # docs/regional-nwp-models-research.md) — caps OpenCV's internal
+      # thread pool so multiple concurrent optical-flow passes don't
+      # oversubscribe cores. Leaving it unset lets the current single
+      # IFS interpolation use all cores for fastest hour-boundary work.
+      # OPENCV_NUM_THREADS: "2"
     volumes:
       - librewxr-cache:/data/cache
     restart: unless-stopped

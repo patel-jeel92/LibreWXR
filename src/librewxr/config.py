@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import math
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -25,7 +26,8 @@ class Settings(BaseSettings):
     workers: int = 1  # Number of uvicorn worker processes
     warmer_threads: int = 0  # Render thread pool size (0 = CPU count - 1)
     warm_coord_zoom: int = 6  # Pre-warm coordinate caches up to this zoom (0 = disable)
-    warm_overview_zoom: int = 4  # Pre-render tiles up to this zoom on each fetch (set to -1 to disable)
+    warm_overview_zoom: int = 4  # Pre-render ALL tiles up to this zoom on each fetch (-1 = disable)
+    warm_overview_zoom_regional: int = 6  # Pre-render tiles overlapping enabled regions up to this zoom (-1 = disable)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
     # North American radar data source.  Three modes:
     #   mrms_fallback  - (default) MRMS primary + IEM fallback for USCOMP + MSC
@@ -34,7 +36,7 @@ class Settings(BaseSettings):
     #                    gaps show as empty (IFS fills in).  Least bandwidth.
     #   iem            - Legacy IEM N0Q for USCOMP, MSC standalone for CACOMP.
     #                    NEXRAD-only, no Canadian radar ingest.
-    na_source: str = "mrms_fallback"
+    na_source: Literal["mrms", "mrms_fallback", "iem"] = "mrms_fallback"
     iem_base_url: str = "https://mesonet.agron.iastate.edu"
     msc_canada_base_url: str = "https://geo.weather.gc.ca"
     mrms_base_url: str = "https://mrms.ncep.noaa.gov/2D"
@@ -51,6 +53,11 @@ class Settings(BaseSettings):
     satellite_enabled: bool = True  # Fetch and serve IFS-derived cloud cover as satellite tiles
     satellite_max_frames: int = 12  # Number of hourly IFS cloud timesteps to keep
     cache_dir: str = ""  # Persistent cache directory for satellite grids; empty = in-memory only
+    # Tile request tracking — observational only; surfaces hot tiles in /health.
+    # See docs/adaptive-tile-warming-design.md for the planned use of this data.
+    tile_tracking_enabled: bool = True
+    tile_tracking_min_zoom: int = 7  # Track only z >= this (overview zooms are pre-warmed anyway)
+    tile_tracking_max_entries: int = 10_000  # Cap per-tile counters; halves when full
     cors_origins: list[str] = ["*"]
 
     def get_ecmwf_max_timesteps(self) -> int:

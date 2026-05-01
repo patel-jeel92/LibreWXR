@@ -406,6 +406,29 @@ _CACHE_ENTRY_BYTES = {
 }
 
 
+def coord_cache_stats() -> dict:
+    """Per-cache hit/miss/fill stats for the /health endpoint.
+
+    Hit ratio + fill ratio are what you want when tuning
+    ``LIBREWXR_COORD_CACHE_SIZE``: low hit ratio with full caches means
+    the cap is too small; full caches with high hit ratio means it's
+    well-sized; partial fills mean the cap has headroom.
+    """
+    caches: dict[str, dict] = {}
+    max_size = 0
+    for fn in ALL_CACHES:
+        info = fn.cache_info()
+        max_size = info.maxsize or 0
+        total = info.hits + info.misses
+        caches[fn.__name__] = {
+            "entries": info.currsize,
+            "hits": info.hits,
+            "misses": info.misses,
+            "hit_ratio": round(info.hits / total, 3) if total else None,
+        }
+    return {"max_size": max_size, "caches": caches}
+
+
 def coord_cache_bytes() -> int:
     """Estimate total memory consumed by all coordinate LRU caches.
 

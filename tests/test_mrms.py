@@ -15,15 +15,14 @@ pytestmark = pytest.mark.sources
 
 from librewxr.data.regions import REGIONS, resolve_regions
 from librewxr.data.sources import (
-    MRMS_SOUTH,
-    MRMS_NORTH,
-    MRMS_WEST,
-    MRMS_EAST,
+    MRMS_EXTENTS,
     MRMSSource,
     _dbz_float_to_uint8,
     _parse_mrms_grib2,
     _resample_mrms_to_region,
 )
+
+MRMS_SOUTH, MRMS_NORTH, MRMS_WEST, MRMS_EAST = MRMS_EXTENTS["USCOMP"]
 
 
 def _make_minimal_grib2(
