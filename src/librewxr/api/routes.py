@@ -32,6 +32,7 @@ router = APIRouter()
 frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
 ecmwf_grid = None  # ECMWFGrid | None
+nwp_chain = None  # NWPChain | None
 cloud_grid = None  # CloudGrid | None
 tile_warmer = None  # TileWarmer | None
 nowcast_store = None  # NowcastStore | None
@@ -264,6 +265,7 @@ async def radar_tile(
         snow=snow,
         fmt=ext,
         ecmwf_grid=ecmwf_grid,
+        nwp_chain=nwp_chain,
         enabled_regions=enabled_regions,
         frame_timestamp=timestamp,
         nowcast_blend=nowcast_blend,
@@ -285,6 +287,7 @@ async def radar_tile(
                 snow=snow,
                 ext=ext,
                 ecmwf_grid=ecmwf_grid,
+                nwp_chain=nwp_chain,
             )
         )
 

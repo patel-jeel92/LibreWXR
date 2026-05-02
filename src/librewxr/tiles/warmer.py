@@ -43,6 +43,7 @@ class TileWarmer:
         snow: bool,
         ext: str,
         ecmwf_grid=None,
+        nwp_chain=None,
         frame_timestamp: int | None = None,
     ) -> None:
         """Schedule background renders for all other timestamps."""
@@ -87,7 +88,7 @@ class TileWarmer:
             self._submit_render(
                 loop, cache_key, frame_regions,
                 z, x, y, tile_size, color, smooth, snow, ext,
-                ecmwf_grid, ts, nowcast_blend,
+                ecmwf_grid, nwp_chain, ts, nowcast_blend,
             )
 
     def _render_and_cache(
@@ -103,6 +104,7 @@ class TileWarmer:
         snow: bool,
         ext: str,
         ecmwf_grid,
+        nwp_chain,
         frame_timestamp: int | None = None,
         nowcast_blend: float | None = None,
     ) -> None:
@@ -120,6 +122,7 @@ class TileWarmer:
                 snow=snow,
                 fmt=ext,
                 ecmwf_grid=ecmwf_grid,
+                nwp_chain=nwp_chain,
                 enabled_regions=self._enabled_regions,
                 frame_timestamp=frame_timestamp,
                 nowcast_blend=nowcast_blend,
@@ -134,6 +137,7 @@ class TileWarmer:
     async def warm_overview(
         self,
         ecmwf_grid=None,
+        nwp_chain=None,
         max_zoom: int = 4,
         max_zoom_regional: int = -1,
         tile_size: int = 256,
@@ -201,7 +205,7 @@ class TileWarmer:
                     self._submit_render(
                         loop, cache_key, frame_regions,
                         z, x, y, tile_size, color, smooth, snow, ext,
-                        ecmwf_grid, ts, nowcast_blend,
+                        ecmwf_grid, nwp_chain, ts, nowcast_blend,
                     )
 
     def _submit_render(
@@ -218,6 +222,7 @@ class TileWarmer:
         snow: bool,
         ext: str,
         ecmwf_grid,
+        nwp_chain,
         ts: int,
         nowcast_blend: float | None,
     ) -> None:
@@ -239,6 +244,7 @@ class TileWarmer:
             snow,
             ext,
             ecmwf_grid,
+            nwp_chain,
             ts,
             nowcast_blend,
         )

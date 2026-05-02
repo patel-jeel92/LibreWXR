@@ -20,6 +20,7 @@ from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
+from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_stations import MRMS_STATIONS
 from librewxr.data.store import FrameStore
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
@@ -90,6 +91,8 @@ async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
     ecmwf_grid = ECMWFGrid()
+    nwp_chain = NWPChain([ecmwf_grid])
+    logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
     cloud = CloudGrid() if settings.satellite_enabled else None
     enabled = settings.get_enabled_regions()
 
@@ -152,6 +155,7 @@ async def lifespan(app: FastAPI):
     routes.frame_store = store
     routes.tile_cache = cache
     routes.ecmwf_grid = ecmwf_grid
+    routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud
     routes.tile_warmer = warmer
     routes.nowcast_store = nowcast_store
@@ -228,6 +232,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(
             warmer.warm_overview(
                 ecmwf_grid=ecmwf_grid,
+                nwp_chain=nwp_chain,
                 max_zoom=settings.warm_overview_zoom,
                 max_zoom_regional=settings.warm_overview_zoom_regional,
             )

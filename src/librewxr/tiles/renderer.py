@@ -32,6 +32,7 @@ def render_tile(
     snow: bool = False,
     fmt: str = "png",
     ecmwf_grid=None,
+    nwp_chain=None,
     enabled_regions: list[str] | None = None,
     frame_timestamp: int | None = None,
     nowcast_blend: float | None = None,
@@ -47,9 +48,10 @@ def render_tile(
         tile_size: 256 or 512
         color_scheme: Rain Viewer color scheme ID
         smooth: apply Gaussian blur
-        snow: use snow color variant (requires ecmwf_grid for classification)
+        snow: use snow color variant (requires nwp_chain for classification)
         fmt: "png" or "webp"
-        ecmwf_grid: ECMWFGrid for global fallback coverage and snow classification
+        ecmwf_grid: ECMWFGrid for IFS-specific motion arrow rendering (.flow)
+        nwp_chain: NWPChain for sample / snow_mask / fallback gating
         enabled_regions: list of enabled region names (for overlap check)
         frame_timestamp: Unix timestamp of the radar frame being rendered
         nowcast_blend: If not None, this is a nowcast frame. Value 0.0–1.0
@@ -65,11 +67,13 @@ def render_tile(
     regions = overlapping_regions(z, x, y, enabled_regions)
     regions_with_data = [r for r in regions if r.name in frame_regions]
 
+    has_nwp = nwp_chain is not None and nwp_chain.has_data()
+
     if not regions_with_data:
-        # No radar regions cover this tile — try ECMWF fallback
-        if ecmwf_grid is not None and ecmwf_grid.data is not None:
+        # No radar regions cover this tile — try NWP fallback
+        if has_nwp:
             return _render_ecmwf_only_tile(
-                ecmwf_grid, z, x, y, tile_size,
+                nwp_chain, ecmwf_grid, z, x, y, tile_size,
                 color_scheme, smooth, snow, fmt, frame_timestamp,
                 ecmwf_flow=ecmwf_flow,
                 arrow_style=arrow_style if flow_regions or ecmwf_flow is not None else "",
@@ -99,18 +103,18 @@ def render_tile(
             smooth, use_blur, pad,
         )
 
-    # Fill uncovered pixels from ECMWF precipitation data.
+    # Fill uncovered pixels from NWP precipitation data.
     # For nowcast frames, blend extrapolated radar with IFS forecast
     # using temporal weight + spatial feathering at coverage boundaries.
-    if ecmwf_grid is not None and ecmwf_grid.data is not None:
+    if has_nwp:
         if nowcast_blend is not None:
             values = _blend_nowcast(
-                values, regions, z, x, y, tile_size, pad, ecmwf_grid,
+                values, regions, z, x, y, tile_size, pad, nwp_chain,
                 frame_timestamp, smooth, nowcast_blend,
             )
         else:
             values = _fill_ecmwf_fallback(
-                values, regions, z, x, y, tile_size, pad, ecmwf_grid,
+                values, regions, z, x, y, tile_size, pad, nwp_chain,
                 frame_timestamp, smooth,
             )
 
@@ -121,12 +125,12 @@ def render_tile(
         values[values < pixel_threshold] = 0
 
     # Apply color scheme with per-pixel snow/rain selection
-    if snow and ecmwf_grid is not None:
+    if snow and nwp_chain is not None:
         if pad > 0:
             lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
         else:
             lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
+        is_snow = nwp_chain.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
         rgba_rain = colorize(values, color_scheme, snow=False)
         rgba_snow = colorize(values, color_scheme, snow=True)
         rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)
@@ -289,15 +293,15 @@ def _fill_ecmwf_fallback(
     regions: list[RegionDef],
     z: int, x: int, y: int,
     tile_size: int, pad: int,
-    ecmwf_grid,
+    nwp_chain,
     frame_timestamp: int | None = None,
     smooth: bool = False,
 ) -> np.ndarray:
-    """Fill pixels outside radar coverage from ECMWF.
+    """Fill pixels outside radar coverage from NWP fallback.
 
     IEM N0Q and the Nordic / DWD composites all encode pixel value 0
     for both "outside radar range" *and* "clear sky within range", so
-    we can't use ``values == 0`` alone — that would make ECMWF bleed
+    we can't use ``values == 0`` alone — that would make NWP bleed
     into legitimately dry areas inside radar coverage. Instead we use
     precomputed station-based coverage masks (see data/coverage.py):
     a pixel is filled only when it has no radar value *and* no region
@@ -311,7 +315,7 @@ def _fill_ecmwf_fallback(
 
     # Union coverage from every region that overlaps this tile — even
     # regions we don't have a frame for yet, because if a station reaches
-    # this tile we still don't want ECMWF overlapping with radar.
+    # this tile we still don't want NWP overlapping with radar.
     covered = np.zeros(lat_grid.shape, dtype=bool)
     for region in regions:
         covered |= sample_coverage(region.name, lat_grid, lon_grid)
@@ -320,12 +324,12 @@ def _fill_ecmwf_fallback(
     if not uncovered.any():
         return values
 
-    ecmwf_values = ecmwf_grid.sample(
+    nwp_values = nwp_chain.sample(
         lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
     )
 
     result = values.copy()
-    result[uncovered] = ecmwf_values[uncovered]
+    result[uncovered] = nwp_values[uncovered]
     return result
 
 
@@ -334,30 +338,30 @@ def _blend_nowcast(
     regions: list[RegionDef],
     z: int, x: int, y: int,
     tile_size: int, pad: int,
-    ecmwf_grid,
+    nwp_chain,
     frame_timestamp: int | None = None,
     smooth: bool = False,
     blend_weight: float = 1.0,
 ) -> np.ndarray:
-    """Blend extrapolated radar with IFS forecast for nowcast frames.
+    """Blend extrapolated radar with NWP forecast for nowcast frames.
 
     Uses a combination of temporal and spatial weighting:
 
     - **Temporal** (``blend_weight``): 1.0 at T+10 min (trust radar),
-      fading to 0.0 at the last nowcast step (trust IFS).
+      fading to 0.0 at the last nowcast step (trust NWP).
     - **Spatial** (feather mask): 1.0 deep inside radar coverage, fading
       to 0.0 at coverage boundaries to prevent hard seams.
 
     The effective per-pixel radar weight is ``blend_weight × feather``.
-    Outside radar coverage, IFS is used directly (same as past frames).
+    Outside radar coverage, NWP is used directly (same as past frames).
     """
     if pad > 0:
         lat_grid, lon_grid = tile_pixel_latlons_padded(z, x, y, tile_size, pad)
     else:
         lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
 
-    # Sample IFS for ALL pixels (not just uncovered)
-    ifs_values = ecmwf_grid.sample(
+    # Sample NWP for ALL pixels (not just uncovered)
+    ifs_values = nwp_chain.sample(
         lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
     )
 
@@ -390,6 +394,7 @@ def _blend_nowcast(
 
 
 def _render_ecmwf_only_tile(
+    nwp_chain,
     ecmwf_grid,
     z: int, x: int, y: int,
     tile_size: int,
@@ -401,9 +406,9 @@ def _render_ecmwf_only_tile(
     ecmwf_flow: np.ndarray | None = None,
     arrow_style: str = "",
 ) -> bytes:
-    """Render a tile entirely from ECMWF data (no radar regions overlap)."""
+    """Render a tile entirely from NWP data (no radar regions overlap)."""
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
-    values = ecmwf_grid.sample(
+    values = nwp_chain.sample(
         lat_grid, lon_grid, frame_timestamp, bilinear=smooth,
     )
 
@@ -415,7 +420,7 @@ def _render_ecmwf_only_tile(
 
     # Apply color scheme with per-pixel snow/rain selection
     if snow:
-        is_snow = ecmwf_grid.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
+        is_snow = nwp_chain.get_snow_mask(lat_grid, lon_grid, frame_timestamp)
         rgba_rain = colorize(values, color_scheme, snow=False)
         rgba_snow = colorize(values, color_scheme, snow=True)
         rgba = np.where(is_snow[..., np.newaxis], rgba_snow, rgba_rain)

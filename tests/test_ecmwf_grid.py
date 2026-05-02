@@ -19,6 +19,7 @@ from librewxr.data.ecmwf_grid import (
     ZR_A_SNOW,
     ZR_B_SNOW,
 )
+from librewxr.data.nwp_source import NWPChain
 
 
 def _inject_timestep(grid, precip_dbz, snow_mask=None, timestamp=1000000):
@@ -349,6 +350,7 @@ class TestECMWFFallbackRendering:
             fmt="png",
             enabled_regions=["USCOMP"],
             ecmwf_grid=grid,
+            nwp_chain=NWPChain([grid]),
         )
         assert len(tile_bytes) > 0
         img = Image.open(io.BytesIO(tile_bytes)).convert("RGBA")
@@ -391,7 +393,7 @@ class TestECMWFFallbackRendering:
         values = np.zeros((256, 256), dtype=np.uint8)
         result = renderer._fill_ecmwf_fallback(
             values, [REGIONS["USCOMP"]], z=4, x=3, y=5, tile_size=256,
-            pad=0, ecmwf_grid=grid,
+            pad=0, nwp_chain=NWPChain([grid]),
         )
         assert (result == 94).all()
 
@@ -420,7 +422,7 @@ class TestECMWFFallbackRendering:
         values = np.zeros((256, 256), dtype=np.uint8)
         result = renderer._fill_ecmwf_fallback(
             values, [REGIONS["USCOMP"]], z=4, x=3, y=5, tile_size=256,
-            pad=0, ecmwf_grid=grid,
+            pad=0, nwp_chain=NWPChain([grid]),
         )
         assert (result[:, :128] == 0).all()
         assert (result[:, 128:] == 200).all()
@@ -442,7 +444,7 @@ class TestECMWFFallbackRendering:
         values[:, :128] = 50
         result = renderer._fill_ecmwf_fallback(
             values, [REGIONS["USCOMP"]], z=4, x=3, y=5, tile_size=256,
-            pad=0, ecmwf_grid=grid,
+            pad=0, nwp_chain=NWPChain([grid]),
         )
         assert (result[:, :128] == 50).all()
         assert (result[:, 128:] == 200).all()
@@ -458,6 +460,7 @@ class TestECMWFFallbackRendering:
             snow_mask=np.ones((GRID_HEIGHT, GRID_WIDTH), dtype=bool),
         )
 
+        chain = NWPChain([grid])
         tile_snow = render_tile(
             frame_regions={},
             z=3, x=3, y=3,
@@ -467,6 +470,7 @@ class TestECMWFFallbackRendering:
             fmt="png",
             enabled_regions=["USCOMP"],
             ecmwf_grid=grid,
+            nwp_chain=chain,
         )
 
         tile_rain = render_tile(
@@ -478,6 +482,7 @@ class TestECMWFFallbackRendering:
             fmt="png",
             enabled_regions=["USCOMP"],
             ecmwf_grid=grid,
+            nwp_chain=chain,
         )
 
         # Snow and rain tiles should differ in color

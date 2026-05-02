@@ -55,6 +55,8 @@ class ECMWFGrid:
     Data attribution: ECMWF IFS, provided by Open-Meteo.com (CC-BY-4.0)
     """
 
+    name = "ecmwf_ifs"
+
     def __init__(self):
         # dict mapping Unix timestamp -> (precip_dbz uint8, snow_mask bool)
         self._timesteps: dict[int, tuple[np.ndarray, np.ndarray]] = {}
@@ -512,6 +514,18 @@ class ECMWFGrid:
         col = np.clip(col, 0, GRID_WIDTH - 1)
 
         return snow_mask[row, col]
+
+    def domain_mask(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        """IFS is global. All pixels covered."""
+        return np.ones(lat.shape, dtype=bool)
+
+    def has_data_at(self, timestamp: int) -> bool:
+        """True if any loaded timestep covers this valid time."""
+        return self._nearest_timestamp(timestamp) is not None
+
+    def has_data(self) -> bool:
+        """True if any timestep is loaded."""
+        return bool(self._sorted_timestamps)
 
     async def close(self) -> None:
         """Clean up resources and remove memmap temp directory."""
