@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -445,27 +446,97 @@ class HRRRGrid:
 
     name = "hrrr"
 
-    def __init__(self):
+    def __init__(self, cache_dir: Path | None = None):
         # (run_ts, lead_seconds) -> memmap-backed uint8 array on the LCC grid
         self._frames: dict[tuple[int, int], np.ndarray] = {}
-        self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_hrrr_"))
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
-        logger.info("HRRR memmap directory: %s", self._memmap_dir)
+
+        # When ``cache_dir`` is given, store memmap files under
+        # ``<cache_dir>/hrrr/`` so they survive process restarts; otherwise
+        # use a temp directory that's cleaned up on close.  The on-disk
+        # layout is identical in both modes (one file per ``(run, lead)``
+        # key) so the eviction logic doesn't need to know the difference.
+        if cache_dir is not None:
+            self._memmap_dir = Path(cache_dir) / "hrrr"
+            self._persistent = True
+        else:
+            self._memmap_dir = Path(tempfile.mkdtemp(prefix="librewxr_hrrr_"))
+            self._persistent = False
+        self._memmap_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "HRRR memmap directory: %s (persistent=%s)",
+            self._memmap_dir,
+            self._persistent,
+        )
+
+        if self._persistent:
+            self._load_cached_frames()
 
     # ── Memory management ────────────────────────────────────────────
 
     def _to_memmap(self, name: str, data: np.ndarray) -> np.ndarray:
-        path = self._memmap_dir / f"{name}.dat"
-        mm = np.memmap(path, dtype=data.dtype, mode="w+", shape=data.shape)
+        """Write ``data`` to disk atomically and return a read-only memmap.
+
+        Atomic write (``.tmp`` → ``os.replace``) means a crash mid-write
+        leaves the previous version intact, never a half-written file.
+        """
+        final = self._memmap_dir / f"{name}.dat"
+        tmp = final.with_suffix(".dat.tmp")
+        mm = np.memmap(tmp, dtype=data.dtype, mode="w+", shape=data.shape)
         mm[:] = data
         mm.flush()
         del mm
-        return np.memmap(path, dtype=data.dtype, mode="r", shape=data.shape)
+        os.replace(tmp, final)
+        return np.memmap(final, dtype=data.dtype, mode="r", shape=data.shape)
 
     def _memmap_path_for(self, run_ts: int, lead_seconds: int) -> Path:
         return self._memmap_dir / f"r{run_ts}_l{lead_seconds}.dat"
+
+    def _load_cached_frames(self) -> None:
+        """Memmap-load every previously-cached ``r{run}_l{lead}.dat`` file.
+
+        Called at startup when ``cache_dir`` is configured.  Frames that
+        the next fetch cycle ends up not needing will be evicted on the
+        first call to ``_evict_outside_window``; everything still inside
+        the active window is served immediately, no cold-start fetch.
+        Stale ``.tmp`` artifacts left behind by a crash mid-write are
+        removed on the way through.
+        """
+        # Stale .tmp files from a crashed atomic-write — drop them.
+        for path in self._memmap_dir.glob("*.tmp"):
+            path.unlink(missing_ok=True)
+
+        loaded = 0
+        for path in self._memmap_dir.glob("r*_l*.dat"):
+            try:
+                stem_parts = path.stem.split("_")
+                if len(stem_parts) != 2:
+                    continue
+                run_ts = int(stem_parts[0][1:])    # strip "r"
+                lead_s = int(stem_parts[1][1:])    # strip "l"
+            except (ValueError, IndexError):
+                continue
+            try:
+                mm = np.memmap(
+                    path,
+                    dtype=np.uint8,
+                    mode="r",
+                    shape=(HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH),
+                )
+            except Exception:
+                logger.warning("Failed to memmap cached %s, removing", path)
+                path.unlink(missing_ok=True)
+                continue
+            self._frames[(run_ts, lead_s)] = mm
+            if self._latest_run_ts is None or run_ts > self._latest_run_ts:
+                self._latest_run_ts = run_ts
+            loaded += 1
+        if loaded:
+            logger.info(
+                "HRRR: loaded %d cached subh frame(s) from disk", loaded,
+            )
 
     @property
     def data_bytes(self) -> int:
@@ -761,8 +832,11 @@ class HRRRGrid:
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None
-        shutil.rmtree(self._memmap_dir, ignore_errors=True)
-        logger.info("HRRR memmap directory cleaned up")
+        if not self._persistent:
+            shutil.rmtree(self._memmap_dir, ignore_errors=True)
+            logger.info("HRRR memmap directory cleaned up")
+        else:
+            logger.info("HRRR cache retained at %s for warm restart", self._memmap_dir)
 
 
 # ── Grid sampling ────────────────────────────────────────────────────

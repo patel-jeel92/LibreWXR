@@ -93,7 +93,12 @@ async def lifespan(app: FastAPI):
     store = FrameStore(max_frames=settings.max_frames)
     cache = TileCache(max_mb=settings.tile_cache_mb)
     ecmwf_grid = ECMWFGrid()
-    hrrr_grid = HRRRGrid() if settings.na_nwp_source == "hrrr" else None
+    if settings.na_nwp_source == "hrrr":
+        from pathlib import Path
+        hrrr_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
+        hrrr_grid = HRRRGrid(cache_dir=hrrr_cache_dir)
+    else:
+        hrrr_grid = None
     chain_sources = [hrrr_grid] if hrrr_grid else []
     chain_sources.append(ecmwf_grid)
     nwp_chain = NWPChain(chain_sources)

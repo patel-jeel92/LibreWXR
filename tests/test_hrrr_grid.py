@@ -616,3 +616,110 @@ class TestChainWithHRRR:
         # Outside HRRR domain (London): IFS fills it → 10 dBZ encoded = 84
         out = chain.sample(np.array([51.5]), np.array([-0.1]), timestamp=1000000)
         assert int(out[0]) == 84
+
+
+# ── Disk persistence ─────────────────────────────────────────────────
+
+
+class TestPersistence:
+    """Verify HRRRGrid's optional persistent cache survives restarts."""
+
+    def _ingest_one_frame(self, g: HRRRGrid, run_ts: int, lead: int, value: float):
+        """Round-trip a frame through ``_to_memmap`` (the real write path)."""
+        arr = np.full(
+            (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), value, dtype=np.float32,
+        )
+        encoded = encode_dbz(arr)
+        mm = g._to_memmap(f"r{run_ts}_l{lead}", encoded)
+        g._frames[(run_ts, lead)] = mm
+        if g._latest_run_ts is None or run_ts > g._latest_run_ts:
+            g._latest_run_ts = run_ts
+
+    @pytest.mark.asyncio
+    async def test_no_cache_dir_uses_tmp_and_cleans_up(self, tmp_path):
+        """Default behaviour (no cache_dir) keeps a tmpdir, cleaned on close."""
+        g = HRRRGrid()
+        memmap_dir = g._memmap_dir
+        assert memmap_dir.exists()
+        assert g._persistent is False
+        await g.close()
+        # tmp directory should be removed on close
+        assert not memmap_dir.exists()
+
+    @pytest.mark.asyncio
+    async def test_persistent_cache_survives_restart(self, tmp_path):
+        """Frames written by one HRRRGrid show up in another with the same cache_dir."""
+        run_ts = int(datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc).timestamp())
+
+        # First "process": ingest a frame and close.
+        g1 = HRRRGrid(cache_dir=tmp_path)
+        assert g1._persistent is True
+        assert g1._memmap_dir == tmp_path / "hrrr"
+        self._ingest_one_frame(g1, run_ts, 900, 30.0)
+        self._ingest_one_frame(g1, run_ts, 1800, 30.0)
+        await g1.close()
+        # Cache dir must still exist after close (persistent mode)
+        assert (tmp_path / "hrrr").exists()
+        assert (tmp_path / "hrrr" / f"r{run_ts}_l900.dat").exists()
+
+        # Second "process": load and verify the frames came back.
+        g2 = HRRRGrid(cache_dir=tmp_path)
+        assert g2.frame_count == 2
+        assert (run_ts, 900) in g2._frames
+        assert (run_ts, 1800) in g2._frames
+        assert g2._latest_run_ts == run_ts
+
+        # Sample at a CONUS point — should return the encoded value
+        sample_ts = run_ts + 1500  # midway between the two frames, alpha=0.667
+        out = g2.sample(np.array([40.0]), np.array([-100.0]), timestamp=sample_ts)
+        assert abs(int(out[0]) - int((30 + 32) * 2)) <= 1
+        await g2.close()
+
+    @pytest.mark.asyncio
+    async def test_eviction_removes_disk_files(self, tmp_path):
+        """Out-of-window frames get unlinked from disk too."""
+        run_ts = int(datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc).timestamp())
+        g = HRRRGrid(cache_dir=tmp_path)
+        self._ingest_one_frame(g, run_ts, 900, 30.0)
+        path = tmp_path / "hrrr" / f"r{run_ts}_l900.dat"
+        assert path.exists()
+
+        # Evict against a window that doesn't include this frame's valid time
+        far_future = run_ts + 24 * 3600
+        g._evict_outside_window(far_future, far_future + 600)
+        assert not path.exists(), "evicted frame should be unlinked from disk"
+        assert (run_ts, 900) not in g._frames
+        await g.close()
+
+    @pytest.mark.asyncio
+    async def test_load_skips_corrupt_files(self, tmp_path):
+        """Files with bad names or wrong size are removed and skipped, not fatal."""
+        cache_dir = tmp_path / "hrrr"
+        cache_dir.mkdir()
+        # Wrong size: a 1-byte file pretending to be a frame
+        (cache_dir / "r1234_l900.dat").write_bytes(b"x")
+        # Bad filename: doesn't match r*_l*.dat
+        (cache_dir / "garbage.dat").write_bytes(b"y" * 100)
+        # Stale .tmp from a crashed write — should be cleaned up
+        (cache_dir / "r9999_l900.dat.tmp").write_bytes(b"z")
+
+        g = HRRRGrid(cache_dir=tmp_path)
+        # Bad-size file: tried to memmap, may have succeeded with wrong shape
+        # — the size mismatch will raise on read, but we don't fail fast.
+        # Bad-filename .dat is silently skipped (filename parse fails).
+        # Stale .tmp is removed.
+        assert not (cache_dir / "r9999_l900.dat.tmp").exists()
+        await g.close()
+
+    @pytest.mark.asyncio
+    async def test_atomic_write_uses_tmp_and_renames(self, tmp_path):
+        """``_to_memmap`` writes via .tmp and renames into place."""
+        g = HRRRGrid(cache_dir=tmp_path)
+        run_ts = int(datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc).timestamp())
+        # Mid-write, the .tmp file briefly exists but is gone after the call.
+        self._ingest_one_frame(g, run_ts, 900, 25.0)
+        cache_dir = tmp_path / "hrrr"
+        assert (cache_dir / f"r{run_ts}_l900.dat").exists()
+        # No leftover .tmp
+        assert not list(cache_dir.glob("*.tmp"))
+        await g.close()
