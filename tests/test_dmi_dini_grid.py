@@ -1,0 +1,468 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Joshua Kimsey
+"""Unit tests for DMI HARMONIE DINI grid math, decode, and chain integration."""
+from __future__ import annotations
+
+import struct
+from datetime import datetime, timezone
+
+import numpy as np
+import pytest
+
+pytestmark = pytest.mark.dmi_dini
+
+from librewxr.data.dmi_dini_grid import (
+    BRACKET_INTERVAL_SECONDS,
+    CYCLE_INTERVAL_SECONDS,
+    DMI_DINI_GRID_HEIGHT,
+    DMI_DINI_GRID_WIDTH,
+    DMI_DINI_LA1,
+    DMI_DINI_LO1,
+    DMIDiniGrid,
+    bracket_lead_seconds,
+    decode_tp_message,
+    domain_mask,
+    feather_mask,
+    file_url,
+    find_tp_message_offset,
+    floor_cycle,
+    grid_indices,
+    latest_published_run,
+    lcc_forward,
+    precip_rate_to_dbz_encoded,
+)
+from librewxr.data.nwp_source import NWPChain, NWPSource
+
+
+# ── LCC projection + grid ─────────────────────────────────────────────
+
+
+class TestLCCProjection:
+    @pytest.mark.parametrize(
+        "name,lat,lon,inside",
+        [
+            # Cities expected INSIDE the verified DINI extent
+            ("London",     51.51,  -0.13, True),
+            ("Paris",      48.86,   2.35, True),
+            ("Berlin",     52.52,  13.41, True),
+            ("Copenhagen", 55.68,  12.57, True),
+            ("Munich",     48.14,  11.58, True),
+            ("Warsaw",     52.23,  21.01, True),
+            ("Reykjavik",  64.13, -21.82, True),
+            ("Helsinki",   60.17,  24.94, True),
+            ("Rome",       41.90,  12.50, True),
+            ("Vienna",     48.21,  16.37, True),
+            ("Stockholm",  59.33,  18.07, True),
+            # Cities expected OUTSIDE the DINI domain
+            ("Madrid",     40.42,  -3.70, False),   # south of grid
+            ("Athens",     37.98,  23.73, False),   # south + east
+            ("Moscow",     55.75,  37.62, False),   # east of grid
+            ("Murmansk",   68.97,  33.08, False),   # north of grid
+            ("New York",   40.71, -74.01, False),   # far west
+            ("Tokyo",      35.68, 139.69, False),
+            ("Cape Town", -33.92,  18.42, False),
+        ],
+    )
+    def test_domain_mask_known_points(self, name, lat, lon, inside):
+        m = domain_mask(np.array([lat]), np.array([lon]))
+        assert bool(m[0]) is inside, name
+
+    def test_grid_origin_at_south_west(self):
+        # The native (un-flipped) GRIB scan puts the SW corner at row N-1,
+        # col 0.  We check via the documented (La1, Lo1) corner.
+        row, col = grid_indices(np.array([DMI_DINI_LA1]), np.array([DMI_DINI_LO1]))
+        # SW corner in our flipped (north-up) grid → row = HEIGHT - 1, col = 0
+        assert abs(row[0] - (DMI_DINI_GRID_HEIGHT - 1)) < 1e-3
+        assert abs(col[0] - 0) < 1e-3
+
+    def test_lcc_north_pole_bounded(self):
+        # At the standard parallel + central meridian, projection should
+        # land on the central meridian's y-axis (x ~ 0).
+        x, y = lcc_forward(np.array([55.5]), np.array([-8.0]))
+        assert abs(float(x[0])) < 1e-3
+
+    def test_lcc_round_trip_at_central_lat(self):
+        # On the standard parallel, LCC scaling is unity; a point at
+        # (55.5°N, central meridian + 1°) should be ~111 km * cos(55.5°) east.
+        x_at_lon0, _ = lcc_forward(np.array([55.5]), np.array([-8.0]))
+        x_at_lon1, _ = lcc_forward(np.array([55.5]), np.array([-7.0]))
+        dx = float(x_at_lon1[0] - x_at_lon0[0])
+        # 1° lon at 55.5°N → ~63 km in true distance, scaled by R/Re ratio
+        # of the conformal projection.  Sanity: 50-80 km range.
+        assert 50_000 < dx < 80_000
+
+
+# ── Feather ───────────────────────────────────────────────────────────
+
+
+class TestFeatherMask:
+    def test_inside_full_weight(self):
+        # Berlin → 1.0 (well inside)
+        f = feather_mask(np.array([52.52]), np.array([13.41]))
+        assert f.dtype == np.float32
+        assert f[0] == pytest.approx(1.0)
+
+    def test_outside_zero(self):
+        # NYC → 0
+        f = feather_mask(np.array([40.71]), np.array([-74.01]))
+        assert f[0] == 0.0
+
+    def test_taper_monotonic_walking_off_north_edge(self):
+        # Walk lat from inside (60°N) to outside (72°N) along the
+        # central meridian.  Feather should be non-increasing.
+        lats = np.linspace(60.0, 72.0, 25)
+        lons = np.full_like(lats, -8.0)
+        f = feather_mask(lats, lons)
+        diffs = np.diff(f)
+        assert (diffs <= 1e-6).all()
+
+
+# ── Timing helpers ────────────────────────────────────────────────────
+
+
+class TestTiming:
+    def test_floor_cycle_3h(self):
+        # 14:23 UTC → 12:00 UTC
+        ts = int(datetime(2026, 5, 1, 14, 23, tzinfo=timezone.utc).timestamp())
+        floored = floor_cycle(ts)
+        expected = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        assert floored == expected
+
+    def test_floor_cycle_at_boundary(self):
+        ts = int(datetime(2026, 5, 1, 15, 0, tzinfo=timezone.utc).timestamp())
+        assert floor_cycle(ts) == ts
+
+    def test_latest_published_run(self):
+        now = int(datetime(2026, 5, 1, 14, 0, tzinfo=timezone.utc).timestamp())
+        # 3h delay → floor_cycle(11:00) = 09:00
+        run = latest_published_run(now, 3 * 3600)
+        expected = int(datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc).timestamp())
+        assert run == expected
+
+    @pytest.mark.parametrize(
+        "lead_min,l0_min,l1_min,alpha",
+        [
+            (0,    0,   60, 0.0),
+            (30,   0,   60, 0.5),
+            (60,   60, 120, 0.0),
+            (90,   60, 120, 0.5),
+            (120, 120, 180, 0.0),
+        ],
+    )
+    def test_bracket_lead_seconds(self, lead_min, l0_min, l1_min, alpha):
+        l0, l1, a = bracket_lead_seconds(lead_min * 60)
+        assert l0 == l0_min * 60
+        assert l1 == l1_min * 60
+        assert a == pytest.approx(alpha)
+
+    def test_cycle_interval_constants(self):
+        assert CYCLE_INTERVAL_SECONDS == 3 * 3600
+        assert BRACKET_INTERVAL_SECONDS == 3600
+
+
+# ── URL construction ──────────────────────────────────────────────────
+
+
+class TestFileUrl:
+    def test_format_matches_dmi_pattern(self):
+        run = datetime(2026, 5, 3, 0, tzinfo=timezone.utc)
+        url = file_url(run, 1)
+        assert url.endswith(
+            "/forecastdata/HARMONIE_DINI_SF/"
+            "HARMONIE_DINI_SF_2026-05-03T000000Z_2026-05-03T010000Z.grib"
+        )
+
+    def test_step_zero_valid_equals_run(self):
+        run = datetime(2026, 5, 3, 0, tzinfo=timezone.utc)
+        url = file_url(run, 0)
+        assert "2026-05-03T000000Z_2026-05-03T000000Z.grib" in url
+
+    def test_step_crosses_day_boundary(self):
+        run = datetime(2026, 5, 3, 21, tzinfo=timezone.utc)
+        url = file_url(run, 6)
+        # 21:00 + 6h = next day 03:00
+        assert "2026-05-03T210000Z_2026-05-04T030000Z.grib" in url
+
+    def test_uses_settings_bucket_and_region(self):
+        run = datetime(2026, 5, 3, 0, tzinfo=timezone.utc)
+        url = file_url(run, 1)
+        assert "dmi-opendata" in url
+        assert "eu-north-1" in url
+
+
+# ── Z-R conversion ────────────────────────────────────────────────────
+
+
+class TestZR:
+    def test_zero_rate_zero_encoded(self):
+        encoded = precip_rate_to_dbz_encoded(np.array([0.0, 0.0]))
+        assert (encoded == 0).all()
+
+    def test_higher_rate_higher_dbz(self):
+        encoded = precip_rate_to_dbz_encoded(np.array([0.5, 5.0, 50.0]))
+        assert encoded[0] < encoded[1] < encoded[2]
+        # 50 mm/h → ~50 dBZ → encoded ≈ 164
+        assert abs(int(encoded[2]) - 164) <= 2
+
+    def test_handles_nan_and_negative(self):
+        encoded = precip_rate_to_dbz_encoded(np.array([np.nan, -1.0, 1.0]))
+        assert encoded[0] == 0
+        assert encoded[1] == 0
+        assert encoded[2] > 0
+
+    def test_dbz_offset_shifts_uniformly(self):
+        rates = np.array([1.0, 5.0, 25.0])
+        base = precip_rate_to_dbz_encoded(rates, dbz_offset=0.0)
+        shifted = precip_rate_to_dbz_encoded(rates, dbz_offset=6.0)
+        # +6 dBZ at encoding scale (dBZ+32)*2 = +12 pixel units
+        for b, s in zip(base, shifted):
+            if b > 0:
+                assert int(s) - int(b) == 12
+
+    def test_zero_rate_offset_still_zero(self):
+        encoded = precip_rate_to_dbz_encoded(
+            np.array([0.0, 0.0]), dbz_offset=10.0,
+        )
+        assert (encoded == 0).all()
+
+
+# ── Decode orientation ────────────────────────────────────────────────
+
+
+class TestDecodeOrientation:
+    def test_decode_flips_south_up_grib(self, monkeypatch):
+        from contextlib import contextmanager
+        from librewxr.data import dmi_dini_grid as dmi
+
+        # Synthetic cfgrib output: row 0 at the SOUTHERN edge.
+        tp = np.zeros((DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), dtype=np.float32)
+        tp[0, 100] = 5.0    # marker at south
+        tp[-1, 200] = 8.0   # marker at north
+
+        # Build latitude coord that increases with row index (south-up).
+        lat = np.broadcast_to(
+            np.linspace(40.0, 70.0, DMI_DINI_GRID_HEIGHT)[:, None],
+            (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
+        )
+        lon = np.broadcast_to(
+            np.linspace(-25.0, 30.0, DMI_DINI_GRID_WIDTH)[None, :],
+            (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
+        )
+
+        import xarray as xr
+        fake_ds = xr.Dataset(
+            {"tp": (("y", "x"), tp)},
+            coords={
+                "latitude": (("y", "x"), lat),
+                "longitude": (("y", "x"), lon),
+            },
+        )
+
+        @contextmanager
+        def _noop():
+            yield
+
+        monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
+        monkeypatch.setattr(dmi, "_suppress_eccodes_stderr", _noop)
+
+        arr = dmi.decode_tp_message(b"ignored")
+        assert arr is not None
+        # After flip: south marker (cfgrib row 0) → our row -1 (south)
+        assert arr[-1, 100] == 5.0
+        assert arr[0, 200] == 8.0
+
+
+# ── Byte-range header walk ────────────────────────────────────────────
+
+
+def _build_synthetic_grib(messages: list[tuple[int, int, int]]) -> bytes:
+    """Build a multi-message GRIB2 byte stream with given (disc, cat, num) tuples.
+
+    Each message uses minimal sections needed for the walker: section 0
+    (16 bytes), section 1 (21 bytes filler), and a section 4 PDS holding
+    the requested category/number.  No real data sections — the walker
+    only reads section 4 to identify variables, then hops by msg_len.
+    """
+    out = bytearray()
+    for disc, cat, num in messages:
+        sec0 = bytearray(16)
+        sec0[:4] = b"GRIB"
+        sec0[6] = disc
+        sec0[7] = 2  # edition
+        # Length filled in below
+        sec1 = bytearray(21)
+        struct.pack_into(">I", sec1, 0, 21)
+        sec1[4] = 1  # section number
+        # Section 4 PDS — minimal layout to identify (cat, num)
+        sec4 = bytearray(34)  # length, sec#, num_coords (2), pdtn (2),
+                              # category (1), parameter (1), ... padding
+        struct.pack_into(">I", sec4, 0, 34)
+        sec4[4] = 4
+        sec4[9] = cat
+        sec4[10] = num
+        # Section 8 end marker
+        sec8 = b"7777"
+        msg_body = bytes(sec1) + bytes(sec4) + sec8
+        msg_len = len(sec0) + len(msg_body)
+        struct.pack_into(">Q", sec0, 8, msg_len)
+        out.extend(sec0)
+        out.extend(msg_body)
+    return bytes(out)
+
+
+class FakeAsyncClient:
+    """Tiny stub mimicking the slice of httpx.AsyncClient the walker uses."""
+    def __init__(self, content: bytes):
+        self._content = content
+
+    async def get(self, url: str, headers: dict | None = None):
+        rng = headers["Range"] if headers else "bytes=0-"
+        # Parse "bytes=START-END"
+        spec = rng.split("=")[1]
+        start, end = spec.split("-")
+        start = int(start)
+        end = int(end) if end else len(self._content) - 1
+        chunk = self._content[start:end + 1]
+        return _FakeResp(chunk)
+
+
+class _FakeResp:
+    def __init__(self, content: bytes):
+        self.content = content
+    def raise_for_status(self):
+        pass
+
+
+class TestHeaderWalk:
+    async def test_finds_tp_message(self):
+        # cat=1 num=52 in the third message
+        content = _build_synthetic_grib([
+            (0, 6, 5),    # cloud cover
+            (0, 0, 0),    # temperature
+            (0, 1, 52),   # tp ← target
+            (0, 1, 8),    # other moisture variable
+        ])
+        client = FakeAsyncClient(content)
+        loc = await find_tp_message_offset("http://fake/", client)
+        assert loc is not None
+        offset, size = loc
+        # Each synthetic message: 16 + 21 + 34 + 4 = 75 bytes
+        assert offset == 75 * 2
+        assert size == 75
+
+    async def test_returns_none_when_missing(self):
+        content = _build_synthetic_grib([
+            (0, 6, 5),
+            (0, 0, 0),
+            (0, 1, 8),    # no num=52 anywhere
+        ])
+        client = FakeAsyncClient(content)
+        loc = await find_tp_message_offset("http://fake/", client)
+        assert loc is None
+
+    async def test_handles_truncated_content(self):
+        # Only "GRIB" prefix — no length, no sections.
+        client = FakeAsyncClient(b"GRIB\x00\x00\x00")
+        loc = await find_tp_message_offset("http://fake/", client)
+        assert loc is None
+
+
+# ── Protocol + sample ─────────────────────────────────────────────────
+
+
+def _inject_frame(g: DMIDiniGrid, run_ts: int, lead_seconds: int, encoded_value: int):
+    """Inject a uniform-value frame into the in-memory store."""
+    arr = np.full(
+        (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH),
+        encoded_value, dtype=np.uint8,
+    )
+    g._frames[(run_ts, lead_seconds)] = arr
+    if g._latest_run_ts is None or run_ts > g._latest_run_ts:
+        g._latest_run_ts = run_ts
+
+
+class TestProtocol:
+    def test_satisfies_nwpsource(self):
+        g = DMIDiniGrid()
+        assert isinstance(g, NWPSource)
+        assert g.name == "dmi_dini"
+
+    def test_empty_grid_returns_zeros(self):
+        g = DMIDiniGrid()
+        out = g.sample(np.array([52.5]), np.array([13.4]), timestamp=12345)
+        assert out.shape == (1,)
+        assert out[0] == 0
+
+    def test_sample_at_exact_bracket(self):
+        g = DMIDiniGrid()
+        run = int(datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 3600, 100)
+        _inject_frame(g, run, 7200, 100)
+        out = g.sample(np.array([52.52]), np.array([13.41]), timestamp=run + 3600)
+        assert int(out[0]) == 100
+
+    def test_sample_lerps_between_brackets(self):
+        g = DMIDiniGrid()
+        run = int(datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 3600, 80)
+        _inject_frame(g, run, 7200, 160)
+        out = g.sample(np.array([52.52]), np.array([13.41]), timestamp=run + 5400)
+        assert abs(int(out[0]) - 120) <= 1
+
+    def test_outside_domain_zero(self):
+        g = DMIDiniGrid()
+        run = int(datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 3600, 200)
+        _inject_frame(g, run, 7200, 200)
+        # Madrid is south of DINI; NYC is far west
+        for lat, lon in [(40.42, -3.70), (40.71, -74.01)]:
+            out = g.sample(np.array([lat]), np.array([lon]), timestamp=run + 3600)
+            assert int(out[0]) == 0
+
+    def test_has_data_at_within_horizon(self):
+        # has_data_at requires BOTH bracketing frames loaded — same
+        # convention as HRRRGrid / ICONEUGrid.  At an exact frame
+        # boundary the bracket is (L, L+interval), so we need three
+        # frames to assert "True" across the (L, L+interval) interior.
+        g = DMIDiniGrid()
+        run = int(datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 3600, 50)
+        _inject_frame(g, run, 7200, 50)
+        _inject_frame(g, run, 10800, 50)
+        assert g.has_data_at(run + 3600) is True
+        assert g.has_data_at(run + 5400) is True
+        assert g.has_data_at(run + 7200) is True
+        # Beyond the last loaded bracket (lead 10800 needs frame at 14400)
+        assert g.has_data_at(run + 11000) is False
+
+
+# ── Chain integration ────────────────────────────────────────────────
+
+
+class TestChainOrdering:
+    def test_chain_prefers_dini_inside_dini_falls_back_outside(self):
+        # Build a minimal DINI in front of a global IFS fallback.  Inside
+        # DINI the chain should return DINI's value; outside DINI it
+        # should return the IFS value.
+        from librewxr.data.ecmwf_grid import ECMWFGrid
+        from librewxr.data.ecmwf_grid import (
+            GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W,
+        )
+
+        ifs = ECMWFGrid()
+        ifs_dbz = np.full((IFS_H, IFS_W), 84, dtype=np.uint8)  # 10 dBZ
+        ifs._timesteps[1000000] = (ifs_dbz, np.zeros_like(ifs_dbz, dtype=bool))
+        ifs._sorted_timestamps = [1000000]
+
+        dini = DMIDiniGrid()
+        run = 1000000 - 1500
+        _inject_frame(dini, run, 0, 164)      # 50 dBZ, exact bracket
+        _inject_frame(dini, run, 3600, 164)
+
+        chain = NWPChain([dini, ifs])
+        # Berlin: inside DINI
+        out_eu = chain.sample(np.array([52.52]), np.array([13.41]), timestamp=1000000)
+        assert abs(int(out_eu[0]) - 164) <= 1
+        # NYC: outside DINI → IFS fills
+        out_us = chain.sample(np.array([40.71]), np.array([-74.01]), timestamp=1000000)
+        assert int(out_us[0]) == 84

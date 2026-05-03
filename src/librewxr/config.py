@@ -54,10 +54,22 @@ class Settings(BaseSettings):
     hrrr_s3_bucket: str = "noaa-hrrr-bdp-pds"
     hrrr_s3_region: str = "us-east-1"
     hrrr_publish_delay_minutes: int = 55  # subh files typically publish ~55 min after run init
-    # European NWP source for the chain. "ifs" leaves IFS as the only
-    # source over Europe. "icon_eu" prepends DWD ICON-EU (~7 km, 3-hourly
-    # cycles) ahead of IFS for the European OPERA radar region.
-    eu_nwp_source: Literal["ifs", "icon_eu"] = "ifs"
+    # European NWP profile for the chain.  Each profile names the full
+    # set of European sources that get instantiated (the chain order
+    # itself is fixed: narrowest-domain first).
+    #   "ifs"                 - no regional NWP; IFS is the only source.
+    #   "icon_eu_only"        - DWD ICON-EU (~7 km, 3-hourly) ahead of IFS.
+    #   "dini_with_icon_eu"   - DMI HARMONIE-AROME DINI (2 km native LCC,
+    #                           3-hourly) ahead of ICON-EU ahead of IFS.
+    #                           DINI covers most of populated Europe;
+    #                           ICON-EU stays in the chain to fill
+    #                           Iberia, southern Italy, the Balkans, and
+    #                           eastern Europe past Poland that DINI
+    #                           doesn't reach.
+    # See project memory entry "EU NWP profile naming refactor"
+    # (project_eu_nwp_profile_refactor.md) for the planned future move
+    # to a list-valued LIBREWXR_EU_NWP_CHAIN setting.
+    eu_nwp_profile: Literal["ifs", "icon_eu_only", "dini_with_icon_eu"] = "ifs"
     icon_eu_base_url: str = "https://opendata.dwd.de/weather/nwp/icon-eu/grib"
     icon_eu_publish_delay_minutes: int = 240  # main runs typically publish ~3-4h after init; 4h is conservative
     # dBZ calibration shift applied after Z-R conversion of ICON-EU
@@ -67,6 +79,16 @@ class Settings(BaseSettings):
     # dBZ higher than the surface rate would predict.  Tune up to make
     # convective cells closer in colour to OPERA radar.
     icon_eu_dbz_offset: float = 6.0
+    # DMI HARMONIE-AROME DINI is published anonymously on AWS Open Data
+    # (s3://dmi-opendata in eu-north-1).  Each (run, lead) is a single
+    # ~600 MB GRIB2 file; we fetch only the tp message (~9 MB) per leadtime
+    # via byte-range, locating it via a one-per-run header walk.
+    dmi_dini_s3_bucket: str = "dmi-opendata"
+    dmi_dini_s3_region: str = "eu-north-1"
+    dmi_dini_publish_delay_minutes: int = 180  # files publish ~3 h after run init
+    # Same Marshall-Palmer caveat as ICON-EU.  HARMONIE has no native
+    # composite reflectivity output so we derive dBZ from accumulated tp.
+    dmi_dini_dbz_offset: float = 6.0
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "radar"  # "radar", "blended", or "model"

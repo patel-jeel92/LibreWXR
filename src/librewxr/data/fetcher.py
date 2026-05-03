@@ -10,6 +10,7 @@ import numpy as np
 from librewxr.config import settings
 from librewxr.memory import release_memory
 from librewxr.data.cloud_grid import CloudGrid
+from librewxr.data.dmi_dini_grid import DMIDiniGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.icon_eu_grid import ICONEUGrid
@@ -43,6 +44,7 @@ class RadarFetcher:
         ecmwf_grid: ECMWFGrid | None = None,
         hrrr_grid: HRRRGrid | None = None,
         icon_eu_grid: ICONEUGrid | None = None,
+        dmi_dini_grid: DMIDiniGrid | None = None,
         cloud_grid: CloudGrid | None = None,
         nowcast_generator=None,
         warmer=None,
@@ -53,6 +55,7 @@ class RadarFetcher:
         self._ecmwf_grid = ecmwf_grid
         self._hrrr_grid = hrrr_grid
         self._icon_eu_grid = icon_eu_grid
+        self._dmi_dini_grid = dmi_dini_grid
         self._cloud_grid = cloud_grid
         self._nowcast_generator = nowcast_generator
         self._warmer = warmer
@@ -164,6 +167,8 @@ class RadarFetcher:
             await self._hrrr_grid.close()
         if self._icon_eu_grid:
             await self._icon_eu_grid.close()
+        if self._dmi_dini_grid:
+            await self._dmi_dini_grid.close()
         logger.info("Radar fetcher stopped")
 
     async def _backfill_then_loop(self) -> None:
@@ -271,6 +276,20 @@ class RadarFetcher:
                 )
             except Exception:
                 logger.warning("ICON-EU fetch failed, EU NWP layer may be stale")
+
+        # DMI HARMONIE-AROME DINI follows the same pattern as ICON-EU
+        # (3-hourly DMI cycles).  Sits ahead of ICON-EU in the chain to
+        # cover NW + central Europe at 2 km native resolution.
+        if self._dmi_dini_grid is not None:
+            try:
+                horizon = settings.nowcast_frames * settings.fetch_interval
+                history = settings.max_frames * settings.fetch_interval
+                await self._dmi_dini_grid.fetch(
+                    history_seconds=history,
+                    horizon_seconds=horizon,
+                )
+            except Exception:
+                logger.warning("DMI DINI fetch failed, NW Europe NWP layer may be stale")
 
         # Cloud data loads in the background — never blocks radar startup.
         # Skip if a previous fetch is still running (downloading .om files

@@ -17,6 +17,7 @@ from librewxr.api import routes
 from librewxr.config import settings
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
+from librewxr.data.dmi_dini_grid import DMIDiniGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.hrrr_grid import HRRRGrid
@@ -52,6 +53,7 @@ _LOG_TAGS = {
     "librewxr.data.ecmwf_interpolation": "ifs",
     "librewxr.data.hrrr_grid": "hrrr",
     "librewxr.data.icon_eu_grid": "icon-eu",
+    "librewxr.data.dmi_dini_grid": "dmi-dini",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -101,15 +103,26 @@ async def lifespan(app: FastAPI):
         hrrr_grid = HRRRGrid(cache_dir=nwp_cache_dir)
     else:
         hrrr_grid = None
-    if settings.eu_nwp_source == "icon_eu":
+    # Both DINI and ICON-EU may be active simultaneously: DINI takes
+    # precedence over its (smaller, higher-res) domain and ICON-EU fills
+    # the broader European coverage outside DINI's footprint.  The
+    # profile name controls which subset is instantiated.
+    if settings.eu_nwp_profile in ("icon_eu_only", "dini_with_icon_eu"):
         icon_eu_grid = ICONEUGrid(cache_dir=nwp_cache_dir)
     else:
         icon_eu_grid = None
+    if settings.eu_nwp_profile == "dini_with_icon_eu":
+        dmi_dini_grid = DMIDiniGrid(cache_dir=nwp_cache_dir)
+    else:
+        dmi_dini_grid = None
     # Chain order = specificity (narrowest domain first), so HRRR fills
-    # CONUS, ICON-EU fills Europe, IFS catches everything else.
+    # CONUS, DMI DINI fills NW + central Europe at 2 km, ICON-EU fills
+    # the rest of Europe at 7 km, IFS catches everything else globally.
     chain_sources = []
     if hrrr_grid:
         chain_sources.append(hrrr_grid)
+    if dmi_dini_grid:
+        chain_sources.append(dmi_dini_grid)
     if icon_eu_grid:
         chain_sources.append(icon_eu_grid)
     chain_sources.append(ecmwf_grid)
@@ -179,6 +192,7 @@ async def lifespan(app: FastAPI):
     routes.ecmwf_grid = ecmwf_grid
     routes.hrrr_grid = hrrr_grid
     routes.icon_eu_grid = icon_eu_grid
+    routes.dmi_dini_grid = dmi_dini_grid
     routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud
     routes.tile_warmer = warmer
@@ -212,6 +226,7 @@ async def lifespan(app: FastAPI):
         ecmwf_grid=ecmwf_grid,
         hrrr_grid=hrrr_grid,
         icon_eu_grid=icon_eu_grid,
+        dmi_dini_grid=dmi_dini_grid,
         cloud_grid=cloud,
         nowcast_generator=nowcast_generator,
         warmer=warmer,
