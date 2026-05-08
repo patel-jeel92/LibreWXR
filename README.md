@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="LibreWXR-Logo.png" alt="LibreWXR" width="200">
+</p>
+
 # LibreWXR
 
 A self-hostable, drop-in replacement for the [Rain Viewer](https://www.rainviewer.com/) API. LibreWXR serves weather radar tiles using freely available radar composite data from multiple sources, with full compatibility for any client built against the Rain Viewer v2 API.
