@@ -118,6 +118,16 @@ class Settings(BaseSettings):
     hrdps_base_url: str = "https://dd.weather.gc.ca"
     hrdps_publish_delay_minutes: int = 240   # ~3.5-4 h after init; 4 h conservative
     hrdps_dbz_offset: float = 6.0            # same Marshall-Palmer caveat as DINI/ICON-EU
+    # Météo-France AROME Antilles: 1.3 km native, 0.025° (~2.5 km) regular
+    # lat/lon public dist, 4 cycles/day (00/06/12/18 UTC), 48 h horizon,
+    # cumulative-since-init total precipitation.  Anonymous via the
+    # data.gouv.fr open-data portal — no API key.  Independent toggle
+    # since the Antilles domain is disjoint from every other regional
+    # source in the chain (Caribbean, abuts the existing PRCOMP radar).
+    arome_antilles_enabled: bool = True
+    arome_antilles_base_url: str = "https://object.data.gouv.fr/meteofrance-pnt"
+    arome_antilles_publish_delay_minutes: int = 420   # ~7 h after init for full 0..48h
+    arome_antilles_dbz_offset: float = 6.0            # same Marshall-Palmer caveat as DINI/ICON-EU
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "radar"  # "radar", "blended", or "model"

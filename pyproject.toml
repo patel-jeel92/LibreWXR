@@ -58,5 +58,6 @@ markers = [
     "icon_eu: ICON-EU grid, lat/lon, and fetch tests",
     "dmi_dini: DMI HARMONIE-AROME DINI grid, LCC, and fetch tests",
     "hrdps: HRDPS rotated lat/lon grid and fetch tests",
+    "arome_antilles: Météo-France AROME Antilles regular lat/lon grid and fetch tests",
     "alerts: WMO CAP weather alerts tests",
 ]

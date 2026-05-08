@@ -15,6 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
 from librewxr.config import settings
+from librewxr.data.arome_antilles_grid import AROMEAntillesGrid
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.dmi_dini_grid import DMIDiniGrid
@@ -60,6 +61,7 @@ _LOG_TAGS = {
     "librewxr.data.icon_eu_grid": "icon-eu",
     "librewxr.data.dmi_dini_grid": "dmi-dini",
     "librewxr.data.hrdps_grid": "hrdps",
+    "librewxr.data.arome_antilles_grid": "arome-ant",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -138,10 +140,18 @@ async def lifespan(app: FastAPI):
         hrdps_grid = HRDPSGrid(cache_dir=nwp_cache_dir)
     else:
         hrdps_grid = None
+    # AROME Antilles fills the eastern Caribbean — disjoint from every
+    # other regional source in the chain, so position relative to the
+    # other regionals doesn't matter.  Sits ahead of IFS to win inside
+    # its domain.
+    if settings.arome_antilles_enabled:
+        arome_antilles_grid = AROMEAntillesGrid(cache_dir=nwp_cache_dir)
+    else:
+        arome_antilles_grid = None
     # Chain order = specificity (narrowest domain first), so HRRR fills
-    # CONUS, HRDPS fills Canada, DMI DINI fills NW + central Europe at
-    # 2 km, ICON-EU fills the rest of Europe at 7 km, IFS catches
-    # everything else globally.
+    # CONUS, HRDPS fills Canada, AROME Antilles fills the Caribbean,
+    # DMI DINI fills NW + central Europe at 2 km, ICON-EU fills the
+    # rest of Europe at 7 km, IFS catches everything else globally.
     chain_sources = []
     if hrrr_grid:
         chain_sources.append(hrrr_grid)
@@ -149,6 +159,8 @@ async def lifespan(app: FastAPI):
         chain_sources.append(hrrr_alaska_grid)
     if hrdps_grid:
         chain_sources.append(hrdps_grid)
+    if arome_antilles_grid:
+        chain_sources.append(arome_antilles_grid)
     if dmi_dini_grid:
         chain_sources.append(dmi_dini_grid)
     if icon_eu_grid:
@@ -251,6 +263,7 @@ async def lifespan(app: FastAPI):
     routes.hrrr_grid = hrrr_grid
     routes.hrrr_alaska_grid = hrrr_alaska_grid
     routes.hrdps_grid = hrdps_grid
+    routes.arome_antilles_grid = arome_antilles_grid
     routes.icon_eu_grid = icon_eu_grid
     routes.dmi_dini_grid = dmi_dini_grid
     routes.nwp_chain = nwp_chain
@@ -287,6 +300,7 @@ async def lifespan(app: FastAPI):
         hrrr_grid=hrrr_grid,
         hrrr_alaska_grid=hrrr_alaska_grid,
         hrdps_grid=hrdps_grid,
+        arome_antilles_grid=arome_antilles_grid,
         icon_eu_grid=icon_eu_grid,
         dmi_dini_grid=dmi_dini_grid,
         cloud_grid=cloud,

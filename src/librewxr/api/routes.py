@@ -41,6 +41,7 @@ ecmwf_grid = None  # ECMWFGrid | None
 hrrr_grid = None  # HRRRGrid | None
 hrrr_alaska_grid = None  # HRRRAlaskaGrid | None
 hrdps_grid = None  # HRDPSGrid | None
+arome_antilles_grid = None  # AROMEAntillesGrid | None
 icon_eu_grid = None  # ICONEUGrid | None
 dmi_dini_grid = None  # DMIDiniGrid | None
 nwp_chain = None  # NWPChain | None
@@ -95,6 +96,7 @@ async def health():
     hrrr_bytes = hrrr_grid.data_bytes if hrrr_grid else 0
     hrrr_alaska_bytes = hrrr_alaska_grid.data_bytes if hrrr_alaska_grid else 0
     hrdps_bytes = hrdps_grid.data_bytes if hrdps_grid else 0
+    arome_antilles_bytes = arome_antilles_grid.data_bytes if arome_antilles_grid else 0
     icon_eu_bytes = icon_eu_grid.data_bytes if icon_eu_grid else 0
     dmi_dini_bytes = dmi_dini_grid.data_bytes if dmi_dini_grid else 0
     nowcast_bytes = nowcast_store.data_bytes if nowcast_store else 0
@@ -102,7 +104,8 @@ async def health():
     coord_bytes = coord_cache_bytes()
     tracked_bytes = (
         radar_bytes + tile_cache_bytes + ecmwf_bytes + hrrr_bytes + hrdps_bytes
-        + icon_eu_bytes + dmi_dini_bytes + nowcast_bytes + satellite_bytes + coord_bytes
+        + arome_antilles_bytes + icon_eu_bytes + dmi_dini_bytes
+        + nowcast_bytes + satellite_bytes + coord_bytes
     )
     other_bytes = max(0, rss_bytes - tracked_bytes)
 
@@ -120,6 +123,7 @@ async def health():
                 "hrrr_grid_mb": round(hrrr_bytes / (1024 * 1024), 1),
                 "hrrr_alaska_grid_mb": round(hrrr_alaska_bytes / (1024 * 1024), 1),
                 "hrdps_grid_mb": round(hrdps_bytes / (1024 * 1024), 1),
+                "arome_antilles_grid_mb": round(arome_antilles_bytes / (1024 * 1024), 1),
                 "icon_eu_grid_mb": round(icon_eu_bytes / (1024 * 1024), 1),
                 "dmi_dini_grid_mb": round(dmi_dini_bytes / (1024 * 1024), 1),
                 "nowcast_mb": round(nowcast_bytes / (1024 * 1024), 1),
@@ -163,6 +167,12 @@ async def health():
             "loaded": hrdps_grid is not None and hrdps_grid.has_data(),
             "latest_run": hrdps_grid.latest_run_iso if hrdps_grid else None,
             "frames": hrdps_grid.frame_count if hrdps_grid else 0,
+        },
+        "arome_antilles_grid": {
+            "enabled": arome_antilles_grid is not None,
+            "loaded": arome_antilles_grid is not None and arome_antilles_grid.has_data(),
+            "latest_run": arome_antilles_grid.latest_run_iso if arome_antilles_grid else None,
+            "frames": arome_antilles_grid.frame_count if arome_antilles_grid else 0,
         },
         "icon_eu_grid": {
             "enabled": icon_eu_grid is not None,
