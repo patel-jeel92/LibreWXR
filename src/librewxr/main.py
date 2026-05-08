@@ -16,6 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from librewxr.api import routes
 from librewxr.config import settings
 from librewxr.data.arome_antilles_grid import AROMEAntillesGrid
+from librewxr.data.wrf_smn_grid import WRFSMNGrid
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.dmi_dini_grid import DMIDiniGrid
@@ -62,6 +63,7 @@ _LOG_TAGS = {
     "librewxr.data.dmi_dini_grid": "dmi-dini",
     "librewxr.data.hrdps_grid": "hrdps",
     "librewxr.data.arome_antilles_grid": "arome-ant",
+    "librewxr.data.wrf_smn_grid": "wrf-smn",
     "librewxr.data.cloud_grid": "cloud",
     "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
@@ -148,10 +150,18 @@ async def lifespan(app: FastAPI):
         arome_antilles_grid = AROMEAntillesGrid(cache_dir=nwp_cache_dir)
     else:
         arome_antilles_grid = None
+    # WRF-SMN covers the South American Southern Cone (Argentina + Chile
+    # + Uruguay + Paraguay + Bolivia + S. Brazil) — disjoint from every
+    # other regional source so position only matters relative to IFS.
+    if settings.wrf_smn_enabled:
+        wrf_smn_grid = WRFSMNGrid(cache_dir=nwp_cache_dir)
+    else:
+        wrf_smn_grid = None
     # Chain order = specificity (narrowest domain first), so HRRR fills
     # CONUS, HRDPS fills Canada, AROME Antilles fills the Caribbean,
     # DMI DINI fills NW + central Europe at 2 km, ICON-EU fills the
-    # rest of Europe at 7 km, IFS catches everything else globally.
+    # rest of Europe at 7 km, WRF-SMN fills S. America's Southern Cone,
+    # IFS catches everything else globally.
     chain_sources = []
     if hrrr_grid:
         chain_sources.append(hrrr_grid)
@@ -165,6 +175,8 @@ async def lifespan(app: FastAPI):
         chain_sources.append(dmi_dini_grid)
     if icon_eu_grid:
         chain_sources.append(icon_eu_grid)
+    if wrf_smn_grid:
+        chain_sources.append(wrf_smn_grid)
     if ecmwf_grid is not None:
         chain_sources.append(ecmwf_grid)
     nwp_chain = NWPChain(chain_sources)
@@ -264,6 +276,7 @@ async def lifespan(app: FastAPI):
     routes.hrrr_alaska_grid = hrrr_alaska_grid
     routes.hrdps_grid = hrdps_grid
     routes.arome_antilles_grid = arome_antilles_grid
+    routes.wrf_smn_grid = wrf_smn_grid
     routes.icon_eu_grid = icon_eu_grid
     routes.dmi_dini_grid = dmi_dini_grid
     routes.nwp_chain = nwp_chain
@@ -301,6 +314,7 @@ async def lifespan(app: FastAPI):
         hrrr_alaska_grid=hrrr_alaska_grid,
         hrdps_grid=hrdps_grid,
         arome_antilles_grid=arome_antilles_grid,
+        wrf_smn_grid=wrf_smn_grid,
         icon_eu_grid=icon_eu_grid,
         dmi_dini_grid=dmi_dini_grid,
         cloud_grid=cloud,

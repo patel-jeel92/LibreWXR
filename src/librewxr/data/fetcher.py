@@ -10,6 +10,7 @@ import numpy as np
 from librewxr.config import settings
 from librewxr.memory import release_memory
 from librewxr.data.arome_antilles_grid import AROMEAntillesGrid
+from librewxr.data.wrf_smn_grid import WRFSMNGrid
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.dmi_dini_grid import DMIDiniGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
@@ -49,6 +50,7 @@ class RadarFetcher:
         hrrr_alaska_grid: HRRRAlaskaGrid | None = None,
         hrdps_grid: HRDPSGrid | None = None,
         arome_antilles_grid: AROMEAntillesGrid | None = None,
+        wrf_smn_grid: WRFSMNGrid | None = None,
         icon_eu_grid: ICONEUGrid | None = None,
         dmi_dini_grid: DMIDiniGrid | None = None,
         cloud_grid: CloudGrid | None = None,
@@ -63,6 +65,7 @@ class RadarFetcher:
         self._hrrr_alaska_grid = hrrr_alaska_grid
         self._hrdps_grid = hrdps_grid
         self._arome_antilles_grid = arome_antilles_grid
+        self._wrf_smn_grid = wrf_smn_grid
         self._icon_eu_grid = icon_eu_grid
         self._dmi_dini_grid = dmi_dini_grid
         self._cloud_grid = cloud_grid
@@ -179,6 +182,8 @@ class RadarFetcher:
             await self._hrdps_grid.close()
         if self._arome_antilles_grid:
             await self._arome_antilles_grid.close()
+        if self._wrf_smn_grid:
+            await self._wrf_smn_grid.close()
         if self._icon_eu_grid:
             await self._icon_eu_grid.close()
         if self._dmi_dini_grid:
@@ -321,6 +326,23 @@ class RadarFetcher:
             except Exception:
                 logger.warning(
                     "AROME Antilles fetch failed, Caribbean NWP layer may be stale"
+                )
+
+        # WRF-SMN follows the same pattern — independent regional NWP
+        # for the South American Cone.  6-hourly SMN cycles, 72 h
+        # horizon, NetCDF4 files (~34 MB each).  Sits ahead of IFS to
+        # win over the Argentine / Chilean / Uruguayan domain.
+        if self._wrf_smn_grid is not None:
+            try:
+                horizon = settings.nowcast_frames * settings.fetch_interval
+                history = settings.max_frames * settings.fetch_interval
+                await self._wrf_smn_grid.fetch(
+                    history_seconds=history,
+                    horizon_seconds=horizon,
+                )
+            except Exception:
+                logger.warning(
+                    "WRF-SMN fetch failed, S. America NWP layer may be stale"
                 )
 
         # ICON-EU follows the same pattern — same active window, walks

@@ -128,6 +128,17 @@ class Settings(BaseSettings):
     arome_antilles_base_url: str = "https://object.data.gouv.fr/meteofrance-pnt"
     arome_antilles_publish_delay_minutes: int = 420   # ~7 h after init for full 0..48h
     arome_antilles_dbz_offset: float = 6.0            # same Marshall-Palmer caveat as DINI/ICON-EU
+    # SMN Argentina WRF-DET: 4 km LCC over Argentina + Chile + Uruguay
+    # + Bolivia + Paraguay + S. Brazil — first regional NWP for the
+    # South American Cone.  Anonymous AWS Open Data S3 (smn-ar-wrf in
+    # us-east-1), 4 cycles/day (00/06/12/18 UTC), 72 h horizon, NetCDF4
+    # files (~34 MB each).  Independent toggle since this is the only
+    # source covering the South American chain slot.
+    wrf_smn_enabled: bool = True
+    wrf_smn_s3_bucket: str = "smn-ar-wrf"
+    wrf_smn_s3_region: str = "us-west-2"   # bucket region per x-amz-bucket-region
+    wrf_smn_publish_delay_minutes: int = 240          # ~3-4 h after init for full 0..72h
+    wrf_smn_dbz_offset: float = 6.0                   # same Marshall-Palmer caveat as DINI/ICON-EU
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "radar"  # "radar", "blended", or "model"
