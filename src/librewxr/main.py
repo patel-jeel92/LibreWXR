@@ -21,6 +21,7 @@ from librewxr.data.dmi_dini_grid import DMIDiniGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.hrdps_grid import HRDPSGrid
+from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
 from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
@@ -55,6 +56,7 @@ _LOG_TAGS = {
     "librewxr.data.ecmwf_grid": "ifs",
     "librewxr.data.ecmwf_interpolation": "ifs",
     "librewxr.data.hrrr_grid": "hrrr",
+    "librewxr.data.hrrr_alaska_grid": "hrrr-ak",
     "librewxr.data.icon_eu_grid": "icon-eu",
     "librewxr.data.dmi_dini_grid": "dmi-dini",
     "librewxr.data.hrdps_grid": "hrdps",
@@ -105,10 +107,17 @@ async def lifespan(app: FastAPI):
     ecmwf_grid = ECMWFGrid() if settings.ecmwf_enabled else None
     from pathlib import Path
     nwp_cache_dir = Path(settings.cache_dir) if settings.cache_dir else None
+    # ``na_nwp_source=hrrr`` enables BOTH HRRR-CONUS and HRRR-Alaska.
+    # They are the same NCEP model running on disjoint domains and sit
+    # on the same anonymous S3 bucket, so a single toggle covers both.
+    # The chain order is CONUS → Alaska → … (order between them is
+    # irrelevant since their domains don't overlap).
     if settings.na_nwp_source == "hrrr":
         hrrr_grid = HRRRGrid(cache_dir=nwp_cache_dir)
+        hrrr_alaska_grid = HRRRAlaskaGrid(cache_dir=nwp_cache_dir)
     else:
         hrrr_grid = None
+        hrrr_alaska_grid = None
     # Both DINI and ICON-EU may be active simultaneously: DINI takes
     # precedence over its (smaller, higher-res) domain and ICON-EU fills
     # the broader European coverage outside DINI's footprint.  The
@@ -136,6 +145,8 @@ async def lifespan(app: FastAPI):
     chain_sources = []
     if hrrr_grid:
         chain_sources.append(hrrr_grid)
+    if hrrr_alaska_grid:
+        chain_sources.append(hrrr_alaska_grid)
     if hrdps_grid:
         chain_sources.append(hrdps_grid)
     if dmi_dini_grid:
@@ -238,6 +249,7 @@ async def lifespan(app: FastAPI):
     routes.tile_cache = cache
     routes.ecmwf_grid = ecmwf_grid
     routes.hrrr_grid = hrrr_grid
+    routes.hrrr_alaska_grid = hrrr_alaska_grid
     routes.hrdps_grid = hrdps_grid
     routes.icon_eu_grid = icon_eu_grid
     routes.dmi_dini_grid = dmi_dini_grid
@@ -273,6 +285,7 @@ async def lifespan(app: FastAPI):
         store, cache,
         ecmwf_grid=ecmwf_grid,
         hrrr_grid=hrrr_grid,
+        hrrr_alaska_grid=hrrr_alaska_grid,
         hrdps_grid=hrdps_grid,
         icon_eu_grid=icon_eu_grid,
         dmi_dini_grid=dmi_dini_grid,

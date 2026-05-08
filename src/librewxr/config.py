@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     hrrr_s3_bucket: str = "noaa-hrrr-bdp-pds"
     hrrr_s3_region: str = "us-east-1"
     hrrr_publish_delay_minutes: int = 55  # subh files typically publish ~55 min after run init
+    # NOAA HRRR-Alaska is bundled with HRRR-CONUS — both are NCEP's
+    # HRRR run on disjoint domains and share the same anonymous S3
+    # bucket, so ``LIBREWXR_NA_NWP_SOURCE=hrrr`` enables both.  Alaska
+    # runs separately at native 3 km polar stereographic, 3-hourly
+    # cycles (00/03/06/09/12/15/18/21Z), 0-48 h horizon, hourly wrfsfcf
+    # surface files (no subh — Alaska runs only have hourly steps).
+    # The publish delay is set independently because the AK run takes
+    # longer to finish than CONUS subh.
+    hrrr_alaska_publish_delay_minutes: int = 80  # full run (0-48 h) typically published within ~80 min
     # European NWP profile for the chain.  Each profile names the full
     # set of European sources that get instantiated (the chain order
     # itself is fixed: narrowest-domain first).

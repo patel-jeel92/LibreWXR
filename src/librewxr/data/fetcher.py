@@ -13,6 +13,7 @@ from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.dmi_dini_grid import DMIDiniGrid
 from librewxr.data.ecmwf_grid import ECMWFGrid
 from librewxr.data.hrdps_grid import HRDPSGrid
+from librewxr.data.hrrr_alaska_grid import HRRRAlaskaGrid
 from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.regions import REGIONS, RegionDef
@@ -44,6 +45,7 @@ class RadarFetcher:
         cache: TileCache,
         ecmwf_grid: ECMWFGrid | None = None,
         hrrr_grid: HRRRGrid | None = None,
+        hrrr_alaska_grid: HRRRAlaskaGrid | None = None,
         hrdps_grid: HRDPSGrid | None = None,
         icon_eu_grid: ICONEUGrid | None = None,
         dmi_dini_grid: DMIDiniGrid | None = None,
@@ -56,6 +58,7 @@ class RadarFetcher:
         self._cache = cache
         self._ecmwf_grid = ecmwf_grid
         self._hrrr_grid = hrrr_grid
+        self._hrrr_alaska_grid = hrrr_alaska_grid
         self._hrdps_grid = hrdps_grid
         self._icon_eu_grid = icon_eu_grid
         self._dmi_dini_grid = dmi_dini_grid
@@ -167,6 +170,8 @@ class RadarFetcher:
             await self._ecmwf_grid.close()
         if self._hrrr_grid:
             await self._hrrr_grid.close()
+        if self._hrrr_alaska_grid:
+            await self._hrrr_alaska_grid.close()
         if self._hrdps_grid:
             await self._hrdps_grid.close()
         if self._icon_eu_grid:
@@ -259,6 +264,23 @@ class RadarFetcher:
                 )
             except Exception:
                 logger.warning("HRRR fetch failed, CONUS NWP layer may be stale")
+
+        # HRRR-Alaska is independent of HRRR-CONUS — same model, disjoint
+        # domain (the HRRR-Alaska polar-stereo grid covers Alaska + the
+        # Aleutian arc, the Bering, and parts of the Yukon and N. Pacific
+        # that HRRR-CONUS' LCC grid never reached).
+        if self._hrrr_alaska_grid is not None:
+            try:
+                horizon = settings.nowcast_frames * settings.fetch_interval
+                history = settings.max_frames * settings.fetch_interval
+                await self._hrrr_alaska_grid.fetch(
+                    history_seconds=history,
+                    horizon_seconds=horizon,
+                )
+            except Exception:
+                logger.warning(
+                    "HRRR-Alaska fetch failed, AK NWP layer may be stale"
+                )
 
         # HRDPS follows the same pattern as HRRR — independent regional
         # NWP layered on top of IFS.  Walks back through 6-hourly ECCC

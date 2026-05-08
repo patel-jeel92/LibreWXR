@@ -39,6 +39,7 @@ frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
 ecmwf_grid = None  # ECMWFGrid | None
 hrrr_grid = None  # HRRRGrid | None
+hrrr_alaska_grid = None  # HRRRAlaskaGrid | None
 hrdps_grid = None  # HRDPSGrid | None
 icon_eu_grid = None  # ICONEUGrid | None
 dmi_dini_grid = None  # DMIDiniGrid | None
@@ -92,6 +93,7 @@ async def health():
     tile_cache_bytes = tile_cache.total_bytes
     ecmwf_bytes = ecmwf_grid.data_bytes if ecmwf_grid else 0
     hrrr_bytes = hrrr_grid.data_bytes if hrrr_grid else 0
+    hrrr_alaska_bytes = hrrr_alaska_grid.data_bytes if hrrr_alaska_grid else 0
     hrdps_bytes = hrdps_grid.data_bytes if hrdps_grid else 0
     icon_eu_bytes = icon_eu_grid.data_bytes if icon_eu_grid else 0
     dmi_dini_bytes = dmi_dini_grid.data_bytes if dmi_dini_grid else 0
@@ -116,6 +118,7 @@ async def health():
                 "tile_cache_mb": round(tile_cache_bytes / (1024 * 1024), 1),
                 "ecmwf_grid_mb": round(ecmwf_bytes / (1024 * 1024), 1),
                 "hrrr_grid_mb": round(hrrr_bytes / (1024 * 1024), 1),
+                "hrrr_alaska_grid_mb": round(hrrr_alaska_bytes / (1024 * 1024), 1),
                 "hrdps_grid_mb": round(hrdps_bytes / (1024 * 1024), 1),
                 "icon_eu_grid_mb": round(icon_eu_bytes / (1024 * 1024), 1),
                 "dmi_dini_grid_mb": round(dmi_dini_bytes / (1024 * 1024), 1),
@@ -148,6 +151,12 @@ async def health():
             "loaded": hrrr_grid is not None and hrrr_grid.has_data(),
             "latest_run": hrrr_grid.latest_run_iso if hrrr_grid else None,
             "frames": hrrr_grid.frame_count if hrrr_grid else 0,
+        },
+        "hrrr_alaska_grid": {
+            "enabled": hrrr_alaska_grid is not None,
+            "loaded": hrrr_alaska_grid is not None and hrrr_alaska_grid.has_data(),
+            "latest_run": hrrr_alaska_grid.latest_run_iso if hrrr_alaska_grid else None,
+            "frames": hrrr_alaska_grid.frame_count if hrrr_alaska_grid else 0,
         },
         "hrdps_grid": {
             "enabled": hrdps_grid is not None,
