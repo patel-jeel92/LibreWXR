@@ -36,6 +36,7 @@ from librewxr.data.hrrr_alaska_grid import (
     ps_forward,
     wrfsfcf_url,
 )
+from librewxr.data.hrrr_grid import compute_snow_mask, find_tmp_2m_records, parse_idx
 from librewxr.data.nwp_source import NWPChain, NWPSource
 
 
@@ -554,3 +555,288 @@ class TestChainIntegration:
             timestamp=1000000,
         )
         assert int(sea[0]) == 64
+
+
+# ── Snow mask ─────────────────────────────────────────────────────────
+
+
+def _inject_snow_mask(
+    grid: HRRRAlaskaGrid, run_ts: int, lead_seconds: int, snow_value: int
+) -> None:
+    """Inject a uniform-value snow mask into HRRRAlaskaGrid for testing."""
+    arr = np.full(
+        (HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH),
+        snow_value & 0x01,
+        dtype=np.uint8,
+    )
+    grid._snow_masks[(run_ts, lead_seconds)] = arr
+
+
+class TestSnowMaskIdxFiltering:
+    """The shared ``find_tmp_2m_records`` works on HRRR-Alaska's wrfsfcf idx too."""
+
+    SAMPLE_IDX = (
+        "1:0:d=2026050112:REFC:entire atmosphere:0 min fcst:\n"
+        "2:200000:d=2026050112:TMP:2 m above ground:0 min fcst:\n"
+        "3:300000:d=2026050112:TMP:surface:0 min fcst:\n"
+        "4:400000:d=2026050112:UGRD:10 m above ground:0 min fcst:\n"
+        "5:500000:d=2026050112:TMP:2 m above ground:60 min fcst:\n"
+    )
+
+    def test_find_tmp_2m_records_filters_level(self):
+        records = parse_idx(self.SAMPLE_IDX)
+        tmps = find_tmp_2m_records(records)
+        # Two TMP-at-2m records; surface TMP and UGRD excluded.
+        assert len(tmps) == 2
+        first_rec, first_end = tmps[0]
+        assert first_rec.var == "TMP"
+        assert first_rec.level == "2 m above ground"
+        assert first_rec.step == "0 min fcst"
+        # First TMP record byte range is bounded by the next record
+        # (surface TMP at 300000), not the next 2-m TMP record.
+        assert first_end == 299999
+        # Last 2-m TMP has no further record → end = -1
+        last_rec, last_end = tmps[-1]
+        assert last_rec.step == "60 min fcst"
+        assert last_end == -1
+
+
+class TestSnowMask:
+    """HRRRAlaskaGrid.get_snow_mask end-to-end behaviour."""
+
+    def test_supports_snow_is_true(self):
+        # The chain dispatcher gates on this — must be True so HRRR-Alaska
+        # actually wins inside its domain.
+        g = HRRRAlaskaGrid()
+        assert g.supports_snow is True
+
+    def test_no_data_returns_all_false(self):
+        g = HRRRAlaskaGrid()
+        lat = np.array([61.2, 64.8])
+        lon = np.array([-149.9, -147.7])
+        out = g.get_snow_mask(lat, lon, timestamp=12345)
+        assert out.dtype == np.bool_
+        assert out.shape == lat.shape
+        assert not out.any()
+
+    def test_no_timestamp_returns_all_false(self):
+        g = HRRRAlaskaGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 0, 30.0)
+        _inject_snow_mask(g, run, 0, 1)
+        out = g.get_snow_mask(
+            np.array([61.2]), np.array([-149.9]), timestamp=None,
+        )
+        assert not out.any()
+
+    def test_uniform_snow_returns_true_in_domain(self):
+        g = HRRRAlaskaGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 0, 30.0)
+        _inject_frame(g, run, 3600, 30.0)
+        _inject_snow_mask(g, run, 0, 1)
+        _inject_snow_mask(g, run, 3600, 1)
+
+        # Anchorage — inside HRRR-Alaska's domain → snow=True
+        out = g.get_snow_mask(
+            np.array([61.2181]), np.array([-149.9003]),
+            timestamp=run + 30 * 60,
+        )
+        assert out.tolist() == [True]
+
+    def test_uniform_rain_returns_false_in_domain(self):
+        g = HRRRAlaskaGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 0, 30.0)
+        _inject_frame(g, run, 3600, 30.0)
+        _inject_snow_mask(g, run, 0, 0)
+        _inject_snow_mask(g, run, 3600, 0)
+
+        out = g.get_snow_mask(
+            np.array([61.2181]), np.array([-149.9003]),
+            timestamp=run + 30 * 60,
+        )
+        assert out.tolist() == [False]
+
+    def test_outside_domain_returns_false(self):
+        g = HRRRAlaskaGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 0, 30.0)
+        _inject_frame(g, run, 3600, 30.0)
+        _inject_snow_mask(g, run, 0, 1)
+        _inject_snow_mask(g, run, 3600, 1)
+
+        # Tokyo — outside HRRR-Alaska's domain
+        out = g.get_snow_mask(
+            np.array([35.6762]), np.array([139.6503]),
+            timestamp=run + 30 * 60,
+        )
+        assert out.tolist() == [False]
+
+    def test_lerp_bracket_majority_at_midpoint(self):
+        # alpha < 0.5 picks L0; alpha >= 0.5 picks L1 (re-binarise at 0.5).
+        g = HRRRAlaskaGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 0, 30.0)
+        _inject_frame(g, run, 3600, 30.0)
+        _inject_snow_mask(g, run, 0, 0)      # L0: rain
+        _inject_snow_mask(g, run, 3600, 1)   # L1: snow
+
+        # alpha=0.25 → L0 wins (closer)
+        out_low = g.get_snow_mask(
+            np.array([61.2181]), np.array([-149.9003]),
+            timestamp=run + 15 * 60,
+        )
+        assert out_low.tolist() == [False]
+
+        # alpha=0.75 → L1 wins (closer)
+        out_high = g.get_snow_mask(
+            np.array([61.2181]), np.array([-149.9003]),
+            timestamp=run + 45 * 60,
+        )
+        assert out_high.tolist() == [True]
+
+    def test_partial_bracket_returns_false(self):
+        # Only L0 snow mask present; L1 snow mask missing — falls through
+        # gracefully so the chain dispatcher reaches the next source.
+        g = HRRRAlaskaGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 0, 30.0)
+        _inject_frame(g, run, 3600, 30.0)
+        _inject_snow_mask(g, run, 0, 1)
+        # Deliberately no snow_mask at lead 3600.
+
+        out = g.get_snow_mask(
+            np.array([61.2181]), np.array([-149.9003]),
+            timestamp=run + 30 * 60,
+        )
+        assert not out.any()
+
+
+class TestSnowMaskPersistence:
+    """Snow masks are atomic-write parallel files alongside REFC frames."""
+
+    @pytest.mark.asyncio
+    async def test_snow_mask_round_trips_through_disk(self, tmp_path):
+        run_ts = int(datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc).timestamp())
+
+        g1 = HRRRAlaskaGrid(cache_dir=tmp_path)
+        arr = np.full(
+            (HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH), 30.0, dtype=np.float32,
+        )
+        for lead in (0, 3600):
+            encoded = encode_dbz(arr)
+            mm = g1._to_memmap(f"r{run_ts}_l{lead}", encoded)
+            g1._frames[(run_ts, lead)] = mm
+            snow = np.ones(
+                (HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH), dtype=np.uint8,
+            )
+            mm_s = g1._to_memmap(f"r{run_ts}_l{lead}_snow", snow)
+            g1._snow_masks[(run_ts, lead)] = mm_s
+        g1._latest_run_ts = run_ts
+        await g1.close()
+
+        cache_dir = tmp_path / "hrrr_alaska"
+        assert (cache_dir / f"r{run_ts}_l0.dat").exists()
+        assert (cache_dir / f"r{run_ts}_l0_snow.dat").exists()
+
+        g2 = HRRRAlaskaGrid(cache_dir=tmp_path)
+        assert g2.frame_count == 2
+        assert g2.snow_mask_count == 2
+        assert (run_ts, 0) in g2._snow_masks
+        assert (run_ts, 3600) in g2._snow_masks
+
+        sample_ts = run_ts + 30 * 60
+        out = g2.get_snow_mask(
+            np.array([61.2181]), np.array([-149.9003]),
+            timestamp=sample_ts,
+        )
+        assert out.tolist() == [True]
+        await g2.close()
+
+    @pytest.mark.asyncio
+    async def test_orphan_snow_mask_is_removed(self, tmp_path):
+        # A snow file without a matching REFC file is dropped on load.
+        cache_dir = tmp_path / "hrrr_alaska"
+        cache_dir.mkdir(parents=True)
+        orphan = cache_dir / "r1234_l0_snow.dat"
+        size = HRRR_AK_GRID_HEIGHT * HRRR_AK_GRID_WIDTH
+        orphan.write_bytes(b"\x00" * size)
+        assert orphan.exists()
+
+        g = HRRRAlaskaGrid(cache_dir=tmp_path)
+        assert not orphan.exists(), "orphan snow file should be removed"
+        assert g.snow_mask_count == 0
+        await g.close()
+
+    @pytest.mark.asyncio
+    async def test_eviction_removes_snow_files_too(self, tmp_path):
+        run_ts = int(datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc).timestamp())
+        g = HRRRAlaskaGrid(cache_dir=tmp_path)
+        arr = np.full(
+            (HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH), 30.0, dtype=np.float32,
+        )
+        encoded = encode_dbz(arr)
+        g._to_memmap(f"r{run_ts}_l0", encoded)
+        snow = np.ones(
+            (HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH), dtype=np.uint8,
+        )
+        g._to_memmap(f"r{run_ts}_l0_snow", snow)
+        # Re-mount so the in-memory dicts know about them.
+        mm = np.memmap(
+            tmp_path / "hrrr_alaska" / f"r{run_ts}_l0.dat",
+            dtype=np.uint8, mode="r",
+            shape=(HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH),
+        )
+        g._frames[(run_ts, 0)] = mm
+        mm_s = np.memmap(
+            tmp_path / "hrrr_alaska" / f"r{run_ts}_l0_snow.dat",
+            dtype=np.uint8, mode="r",
+            shape=(HRRR_AK_GRID_HEIGHT, HRRR_AK_GRID_WIDTH),
+        )
+        g._snow_masks[(run_ts, 0)] = mm_s
+
+        # Evict to a window far in the future
+        far_future = run_ts + 7 * 24 * 3600
+        g._evict_outside_window(far_future, far_future + 600)
+        assert (run_ts, 0) not in g._frames
+        assert (run_ts, 0) not in g._snow_masks
+        assert not (tmp_path / "hrrr_alaska" / f"r{run_ts}_l0.dat").exists()
+        assert not (tmp_path / "hrrr_alaska" / f"r{run_ts}_l0_snow.dat").exists()
+        await g.close()
+
+
+class TestChainSnowMaskWithHRRRAlaska:
+    def test_chain_prefers_hrrr_alaska_snow_inside_domain(self):
+        from librewxr.data.ecmwf_grid import ECMWFGrid
+        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+
+        # IFS says snow everywhere; HRRR-Alaska says rain everywhere.
+        # Inside HRRR-AK's domain, HRRR-AK wins → rain.  Outside, IFS
+        # wins → snow.
+        ifs = ECMWFGrid()
+        ifs_dbz = np.full((IFS_H, IFS_W), int((10 + 32) * 2), dtype=np.uint8)
+        ifs_snow = np.ones((IFS_H, IFS_W), dtype=bool)
+        ifs._timesteps[1000000] = (ifs_dbz, ifs_snow)
+        ifs._sorted_timestamps = [1000000]
+
+        ak = HRRRAlaskaGrid()
+        run = 1000000 - 1800  # target lead = 30 min in (0, 3600) bracket
+        _inject_frame(ak, run, 0, 30.0)
+        _inject_frame(ak, run, 3600, 30.0)
+        _inject_snow_mask(ak, run, 0, 0)      # rain
+        _inject_snow_mask(ak, run, 3600, 0)
+
+        chain = NWPChain([ak, ifs])
+
+        # Anchorage: HRRR-AK says rain → False
+        out = chain.get_snow_mask(
+            np.array([61.2181]), np.array([-149.9003]), timestamp=1000000,
+        )
+        assert out.tolist() == [False]
+
+        # Outside HRRR-AK domain (London): IFS wins → True
+        out = chain.get_snow_mask(
+            np.array([51.5]), np.array([-0.1]), timestamp=1000000,
+        )
+        assert out.tolist() == [True]
