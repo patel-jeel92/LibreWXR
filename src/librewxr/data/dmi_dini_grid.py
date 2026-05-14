@@ -193,7 +193,15 @@ def precip_rate_to_dbz_encoded(
 # ── Run / step timing ─────────────────────────────────────────────────
 
 CYCLE_INTERVAL_SECONDS = 3 * 3600        # DMI DINI deterministic runs every 3 h
-BRACKET_INTERVAL_SECONDS = 3600          # forecast steps are 1 hour apart
+SOURCE_STEP_SECONDS = 3600               # forecast steps are 1 hour apart in the source files
+# Backwards-compatible alias — existing call sites and tests reference
+# the name directly.  Prefer ``SOURCE_STEP_SECONDS`` in new code.
+BRACKET_INTERVAL_SECONDS = SOURCE_STEP_SECONDS
+# Post-interpolation stored cadence.  When ``LIBREWXR_REGIONAL_INTERPOLATION``
+# is enabled, the fetch loop runs Farneback warping at the end to fill
+# 10-minute synthetic frames between hourly originals; the bracket
+# lookup then walks at this finer interval.
+STORED_INTERVAL_SECONDS = 600
 MAX_FORECAST_HOURS = 60                  # all runs reach +60 h
 
 # Two cycles of lookback (6 h) is plenty: each run covers +60 h, far
@@ -213,17 +221,26 @@ def latest_published_run(now_ts: int, publish_delay_seconds: int) -> int:
     return floor_cycle(now_ts - publish_delay_seconds)
 
 
-def bracket_lead_seconds(lead_seconds: int) -> tuple[int, int, float]:
+def bracket_lead_seconds(
+    lead_seconds: int,
+    interval_seconds: int = SOURCE_STEP_SECONDS,
+) -> tuple[int, int, float]:
     """For a desired lead, return ``(L0, L1, alpha)`` such that L0 ≤ L < L1.
 
-    Both leads are exact hour multiples (multiples of 3600 s, ≥ 0).
-    Alpha is the lerp weight: 0 at L0, 1 at L1.
+    Both leads are exact multiples of ``interval_seconds``, ≥ 0.  Alpha
+    is the lerp weight: 0 at L0, 1 at L1.
+
+    Defaults to ``SOURCE_STEP_SECONDS`` (3600 s — the raw hourly source
+    cadence).  Pass ``STORED_INTERVAL_SECONDS`` (600 s) to bracket
+    against the post-interpolation cadence — that's what the
+    ``DMIDiniGrid`` class does internally when
+    ``LIBREWXR_REGIONAL_INTERPOLATION`` is enabled.
     """
     if lead_seconds < 0:
         return 0, 0, 0.0
-    l0 = (lead_seconds // BRACKET_INTERVAL_SECONDS) * BRACKET_INTERVAL_SECONDS
-    l1 = l0 + BRACKET_INTERVAL_SECONDS
-    alpha = (lead_seconds - l0) / BRACKET_INTERVAL_SECONDS
+    l0 = (lead_seconds // interval_seconds) * interval_seconds
+    l1 = l0 + interval_seconds
+    alpha = (lead_seconds - l0) / interval_seconds
     return l0, l1, alpha
 
 
@@ -550,8 +567,16 @@ class DMIDiniGrid:
         if run is None:
             return False
         lead = timestamp - run
-        l0, l1, _ = bracket_lead_seconds(lead)
+        l0, l1, _ = bracket_lead_seconds(lead, self._bracket_interval())
         return ((run, l0) in self._frames) and ((run, l1) in self._frames)
+
+    def _bracket_interval(self) -> int:
+        """Stored frame spacing — finer when interpolation is enabled."""
+        return (
+            STORED_INTERVAL_SECONDS
+            if settings.regional_interpolation
+            else SOURCE_STEP_SECONDS
+        )
 
     @property
     def supports_snow(self) -> bool:
@@ -578,7 +603,7 @@ class DMIDiniGrid:
         if run is None:
             return np.zeros(lat.shape, dtype=np.uint8)
         lead = timestamp - run
-        l0, l1, alpha = bracket_lead_seconds(lead)
+        l0, l1, alpha = bracket_lead_seconds(lead, self._bracket_interval())
         f0 = self._frames.get((run, l0))
         f1 = self._frames.get((run, l1))
         if f0 is None or f1 is None:
@@ -599,12 +624,13 @@ class DMIDiniGrid:
 
     def _pick_run(self, timestamp: int) -> int | None:
         """Pick the freshest run whose bracket is loaded for ``timestamp``."""
+        interval = self._bracket_interval()
         loaded_runs = sorted({r for (r, _) in self._frames}, reverse=True)
         for run in loaded_runs:
             lead = timestamp - run
             if not (0 <= lead <= MAX_FORECAST_HOURS * 3600):
                 continue
-            l0, l1, _ = bracket_lead_seconds(lead)
+            l0, l1, _ = bracket_lead_seconds(lead, interval)
             if (run, l0) in self._frames and (run, l1) in self._frames:
                 return run
         return None
@@ -679,19 +705,69 @@ class DMIDiniGrid:
                     elif added < 0:
                         total_failed += 1
 
+            # Phase 2: optical-flow interpolation per run.  Fills 10-min
+            # synthetic frames between hourly originals so a cell moving
+            # 40-80 km/hr across northern Europe doesn't cross-fade
+            # between bracket frames.  Idempotent: re-running on an
+            # already-interpolated run is a no-op.
+            total_interpolated = 0
+            if settings.regional_interpolation:
+                for run_ts in runs_to_consider:
+                    total_interpolated += self._interpolate_run_frames(run_ts)
+
             self._evict_outside_window(window_start, window_end)
 
             if total_fetched:
                 logger.info(
-                    "DMI DINI: %d frame(s) ingested across %d run(s); "
-                    "store now holds %d frame(s)",
-                    total_fetched, len(runs_to_consider), len(self._frames),
+                    "DMI DINI: %d hourly frame(s) ingested + %d interpolated "
+                    "across %d run(s); store now holds %d frame(s)",
+                    total_fetched, total_interpolated,
+                    len(runs_to_consider), len(self._frames),
                 )
             elif total_failed:
                 logger.warning(
                     "DMI DINI: no frames ingested (%d file(s) failed)",
                     total_failed,
                 )
+
+    def _interpolate_run_frames(self, run_ts: int) -> int:
+        """Fill 10-min synthetic frames between hourly originals for one run.
+
+        Pulls this run's hourly precip frames out of ``self._frames``,
+        delegates to the shared Farneback warper, and memmap-writes the
+        synthetic frames back into ``self._frames`` at the new
+        ``lead_seconds`` keys.  DMI DINI does not yet derive a snow
+        mask (that's a Phase 9 follow-up), so we pass ``None`` for the
+        snow side — only precip frames get interpolated.
+
+        Returns the number of synthetic frames added.  Idempotent: if
+        the run already has stored-interval spacing, no work is done.
+        """
+        from librewxr.data.nwp_interpolation import interpolate_run
+
+        frames_by_lead: dict[int, np.ndarray] = {
+            lead: arr
+            for (r, lead), arr in self._frames.items()
+            if r == run_ts
+        }
+        if len(frames_by_lead) < 2:
+            return 0
+
+        aug_frames, _aug_snow, _flow = interpolate_run(
+            frames_by_lead,
+            snow_masks_by_ts=None,
+            target_interval_seconds=STORED_INTERVAL_SECONDS,
+            log_label=f"DMI DINI interpolation (run {run_ts})",
+        )
+
+        added = 0
+        for lead, arr in aug_frames.items():
+            if (run_ts, lead) in self._frames:
+                continue
+            mm = self._to_memmap(f"r{run_ts}_l{lead}", arr)
+            self._frames[(run_ts, lead)] = mm
+            added += 1
+        return added
 
     async def _fetch_one_step(
         self, run: datetime, step_hour: int, client: httpx.AsyncClient,

@@ -18,6 +18,8 @@ from librewxr.data.dmi_dini_grid import (
     DMI_DINI_GRID_WIDTH,
     DMI_DINI_LA1,
     DMI_DINI_LO1,
+    SOURCE_STEP_SECONDS,
+    STORED_INTERVAL_SECONDS,
     DMIDiniGrid,
     bracket_lead_seconds,
     decode_tp_message,
@@ -381,6 +383,16 @@ def _inject_frame(g: DMIDiniGrid, run_ts: int, lead_seconds: int, encoded_value:
         g._latest_run_ts = run_ts
 
 
+@pytest.fixture
+def hourly_brackets(monkeypatch):
+    """Force the legacy hourly bracket behaviour for tests that inject
+    frames at hourly spacing only.  Post-interpolation behaviour gets
+    its own dedicated test class.
+    """
+    from librewxr.config import settings as _settings
+    monkeypatch.setattr(_settings, "regional_interpolation", False)
+
+
 class TestProtocol:
     def test_satisfies_nwpsource(self):
         g = DMIDiniGrid()
@@ -393,7 +405,7 @@ class TestProtocol:
         assert out.shape == (1,)
         assert out[0] == 0
 
-    def test_sample_at_exact_bracket(self):
+    def test_sample_at_exact_bracket(self, hourly_brackets):
         g = DMIDiniGrid()
         run = int(datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc).timestamp())
         _inject_frame(g, run, 3600, 100)
@@ -401,7 +413,7 @@ class TestProtocol:
         out = g.sample(np.array([52.52]), np.array([13.41]), timestamp=run + 3600)
         assert int(out[0]) == 100
 
-    def test_sample_lerps_between_brackets(self):
+    def test_sample_lerps_between_brackets(self, hourly_brackets):
         g = DMIDiniGrid()
         run = int(datetime(2026, 5, 3, 0, 0, tzinfo=timezone.utc).timestamp())
         _inject_frame(g, run, 3600, 80)
@@ -419,7 +431,7 @@ class TestProtocol:
             out = g.sample(np.array([lat]), np.array([lon]), timestamp=run + 3600)
             assert int(out[0]) == 0
 
-    def test_has_data_at_within_horizon(self):
+    def test_has_data_at_within_horizon(self, hourly_brackets):
         # has_data_at requires BOTH bracketing frames loaded — same
         # convention as HRRRGrid / ICONEUGrid.  At an exact frame
         # boundary the bracket is (L, L+interval), so we need three
@@ -440,7 +452,7 @@ class TestProtocol:
 
 
 class TestChainOrdering:
-    def test_chain_prefers_dini_inside_dini_falls_back_outside(self):
+    def test_chain_prefers_dini_inside_dini_falls_back_outside(self, hourly_brackets):
         # Build a minimal DINI in front of a global IFS fallback.  Inside
         # DINI the chain should return DINI's value; outside DINI it
         # should return the IFS value.
@@ -466,3 +478,134 @@ class TestChainOrdering:
         # NYC: outside DINI → IFS fills
         out_us = chain.sample(np.array([40.71]), np.array([-74.01]), timestamp=1000000)
         assert int(out_us[0]) == 84
+
+
+# ── Optical-flow interpolation ────────────────────────────────────────
+
+
+def _make_blob(
+    cy: int, cx: int, radius: int = 30, value: int = 150,
+) -> np.ndarray:
+    """Build a test precip grid with a circular blob at (cy, cx)."""
+    grid = np.zeros((DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH), dtype=np.uint8)
+    ys, xs = np.ogrid[0:DMI_DINI_GRID_HEIGHT, 0:DMI_DINI_GRID_WIDTH]
+    mask = (ys - cy) ** 2 + (xs - cx) ** 2 <= radius ** 2
+    grid[mask] = value
+    return grid
+
+
+class TestInterpolateRunFrames:
+    """``_interpolate_run_frames`` fills 10-min synthetics between hourly originals."""
+
+    def test_fills_synthetic_leads_between_hourly_originals(self):
+        # Inject two hourly originals; expect 5 synthetics at 600s steps.
+        grid = DMIDiniGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        f0 = _make_blob(400, 600)
+        f1 = _make_blob(400, 650)   # blob translated by 50 px east
+        grid._frames[(run_ts, 0)] = f0
+        grid._frames[(run_ts, 3600)] = f1
+        grid._latest_run_ts = run_ts
+
+        added = grid._interpolate_run_frames(run_ts)
+        assert added == 5  # leads 600, 1200, 1800, 2400, 3000
+        for lead in (600, 1200, 1800, 2400, 3000):
+            assert (run_ts, lead) in grid._frames
+            arr = grid._frames[(run_ts, lead)]
+            assert arr.shape == (DMI_DINI_GRID_HEIGHT, DMI_DINI_GRID_WIDTH)
+            assert arr.dtype == np.uint8
+
+    def test_idempotent_on_second_call(self):
+        grid = DMIDiniGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        grid._frames[(run_ts, 0)] = _make_blob(400, 600)
+        grid._frames[(run_ts, 3600)] = _make_blob(400, 650)
+        grid._latest_run_ts = run_ts
+
+        first = grid._interpolate_run_frames(run_ts)
+        second = grid._interpolate_run_frames(run_ts)
+        assert first == 5
+        assert second == 0
+
+    def test_no_snow_mask_side_effects(self):
+        # DMI DINI doesn't have snow masks yet (Phase 9 follow-up).  The
+        # interpolator must not invent one — only precip frames should be
+        # produced.
+        grid = DMIDiniGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        grid._frames[(run_ts, 0)] = _make_blob(400, 600)
+        grid._frames[(run_ts, 3600)] = _make_blob(400, 650)
+        grid._latest_run_ts = run_ts
+
+        grid._interpolate_run_frames(run_ts)
+        # No attribute on DMI DINI at all — assert via hasattr.
+        assert not hasattr(grid, "_snow_masks")
+
+    def test_returns_zero_when_run_has_one_or_fewer_frames(self):
+        grid = DMIDiniGrid()
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        # No frames yet
+        assert grid._interpolate_run_frames(run_ts) == 0
+        # Only one frame
+        grid._frames[(run_ts, 0)] = _make_blob(400, 600)
+        assert grid._interpolate_run_frames(run_ts) == 0
+
+    def test_skips_other_runs(self):
+        grid = DMIDiniGrid()
+        run_a = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        run_b = run_a + 3 * 3600  # DMI cycle interval is 3 h
+        grid._frames[(run_a, 0)] = _make_blob(400, 600)
+        grid._frames[(run_a, 3600)] = _make_blob(400, 650)
+        grid._frames[(run_b, 0)] = _make_blob(400, 600)
+        grid._frames[(run_b, 3600)] = _make_blob(400, 650)
+
+        added_a = grid._interpolate_run_frames(run_a)
+        assert added_a == 5
+        # run_b untouched until its own _interpolate_run_frames call
+        run_b_leads = [lead for (r, lead) in grid._frames if r == run_b]
+        assert sorted(run_b_leads) == [0, 3600]
+
+
+class TestPostInterpolationBracket:
+    """Sample uses 10-min brackets when frames are interpolated."""
+
+    @pytest.mark.asyncio
+    async def test_sample_uses_10min_bracket_when_interpolation_enabled(self, tmp_path):
+        grid = DMIDiniGrid(cache_dir=tmp_path)
+        run_ts = int(datetime(2026, 5, 8, 6, tzinfo=timezone.utc).timestamp())
+        f0 = _make_blob(400, 600)
+        f1 = _make_blob(400, 650)
+        mm0 = grid._to_memmap(f"r{run_ts}_l0", f0)
+        mm1 = grid._to_memmap(f"r{run_ts}_l3600", f1)
+        grid._frames[(run_ts, 0)] = mm0
+        grid._frames[(run_ts, 3600)] = mm1
+        grid._latest_run_ts = run_ts
+
+        # Interpolate to populate 600s synthetics.
+        grid._interpolate_run_frames(run_ts)
+
+        # Bracket at 25 min in should be (1200, 1800), alpha=0.5.
+        ts = run_ts + 25 * 60
+        l0, l1, alpha = bracket_lead_seconds(ts - run_ts, 600)
+        assert l0 == 1200
+        assert l1 == 1800
+        assert alpha == pytest.approx(0.5)
+        assert (run_ts, 1200) in grid._frames
+        assert (run_ts, 1800) in grid._frames
+
+        # _pick_run finds the run via the 600s bracket lookup.
+        assert grid._pick_run(ts) == run_ts
+        await grid.close()
+
+
+class TestRegionalInterpolationToggle:
+    """The bracket interval follows ``LIBREWXR_REGIONAL_INTERPOLATION``."""
+
+    def test_bracket_interval_is_hourly_when_disabled(self, hourly_brackets):
+        grid = DMIDiniGrid()
+        assert grid._bracket_interval() == SOURCE_STEP_SECONDS
+
+    def test_bracket_interval_is_10min_when_enabled(self):
+        # Default settings have it enabled.
+        grid = DMIDiniGrid()
+        assert grid._bracket_interval() == STORED_INTERVAL_SECONDS
