@@ -337,26 +337,50 @@ def _draw_basemap(ax) -> None:
         ))
 
 
+def _unwrap_longitudes(lon: np.ndarray) -> np.ndarray:
+    """Make a polygon's longitude trace continuous across the ±180° line.
+
+    Each consecutive Δlon > 180° gets compensated by subtracting 360°
+    from every subsequent point; Δlon < −180° adds 360°.  The result
+    may exit the [−180, 180] window — that's intentional, the renderer
+    plots three offset copies so axis clipping at ±180° lands the
+    correct piece on each side of the map.
+    """
+    if len(lon) < 2:
+        return lon.copy()
+    out = lon.astype(float).copy()
+    for i in range(1, len(out)):
+        d = out[i] - out[i - 1]
+        if d > 180:
+            out[i:] -= 360
+        elif d < -180:
+            out[i:] += 360
+    return out
+
+
 def _draw_polygon(ax, src: Source, alpha_fill: float, hatch: str | None) -> None:
-    """Split on antimeridian wraps so a polygon spanning ±180 doesn't
-    smear horizontally across the plot."""
+    """Render a coverage polygon with clean handling of antimeridian wrap.
+
+    The polygon's longitudes are first unwrapped into one continuous
+    trace (which may extend past ±180°), then the same closed polygon
+    is plotted three times — at offsets −360°, 0°, +360° — so whichever
+    copy lands inside the [−180°, 180°] axis window is drawn cleanly
+    and the others are clipped away by matplotlib.  This avoids the
+    half-closed sliver artefact you get from splitting the polygon at
+    the wrap and rendering each segment separately.
+    """
     poly = src.polygon
-    lon = poly[:, 0]
-    wrap_idx = np.where(np.abs(np.diff(lon)) > 180)[0]
-    if len(wrap_idx) == 0:
-        segments = [poly]
-    else:
-        segments = []
-        start = 0
-        for idx in wrap_idx:
-            segments.append(poly[start:idx + 1])
-            start = idx + 1
-        segments.append(poly[start:])
-    for seg in segments:
-        if seg.shape[0] < 3:
+    if poly.shape[0] < 3:
+        return
+    lon_unwrapped = _unwrap_longitudes(poly[:, 0])
+    lat = poly[:, 1]
+    for offset in (-360.0, 0.0, 360.0):
+        shifted_lon = lon_unwrapped + offset
+        # Skip copies that can't possibly overlap the visible window.
+        if shifted_lon.max() < -180 or shifted_lon.min() > 180:
             continue
         ax.fill(
-            seg[:, 0], seg[:, 1],
+            shifted_lon, lat,
             facecolor=src.color, edgecolor=src.color,
             alpha=alpha_fill, linewidth=1.2,
             hatch=hatch, zorder=2,
