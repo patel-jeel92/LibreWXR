@@ -436,6 +436,25 @@ All stores are memmap-backed — the OS page cache manages physical RAM
 and pages are reclaimed under pressure, so total resident set scales
 with what's actually being touched, not with what's loaded.
 
+### Coverage
+
+LibreWXR fuses native radar from three regional networks and a chain of
+high-resolution NWP models. ECMWF IFS provides global coverage
+everywhere else and isn't shown.
+
+**Radar composites:**
+
+![Radar coverage map](docs/coverage-map-radar.png)
+
+**Regional NWP models:**
+
+![Regional NWP coverage map](docs/coverage-map-models.png)
+
+Polygon shapes follow each grid's actual projected domain (LCC, polar
+stereographic, LAEA, rotated lat/lon, or regular lat/lon) — not a
+misleading lat/lon bounding box — so the curved edges visible on HRRR,
+HRDPS, DMI DINI, OPERA, and WRF-SMN are the real coverage boundaries.
+
 ### Deployment modes
 
 LibreWXR supports two deployment modes.
