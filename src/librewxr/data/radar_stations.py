@@ -256,207 +256,226 @@ CANADA_STATIONS: list[tuple[float, float]] = [
 ]
 
 
-# OPERA pan-European CIRRUS composite radar network (~155 stations).
-# Coordinates from MeteoGate /locations API and national met services.
+# OPERA pan-European CIRRUS composite radar network.
+# Sourced verbatim from the official EUMETNET OPERA radar database
+# (status=operational only):
+#   https://www.eumetnet.eu/wp-content/themes/aeron-child/observations-programme/current-activities/opera/database/OPERA_Database/
 # Used for station-circle coverage masks to prevent ECMWF fallback
-# suppression across the entire LAEA grid bbox.
+# suppression across the entire LAEA grid bbox.  Regenerate this
+# list by downloading Data/OPERA_RADARS_DB_<date>.json from the OPERA
+# Database page and filtering on status="1".
 OPERA_STATIONS: list[tuple[float, float]] = [
-    # Austria (AT) - 5 radars
-    (47.0785, 15.4554),   # atfuh Feldkirchen/Graz
-    (46.0428, 14.566),    # atljs Ljubljana (SI shared)
-    (47.8383, 13.0061),   # atpat Patscherkofel/Salzburg
-    (48.1133, 16.5517),   # atrau Wien/Rauchenwarth
-    (47.3264, 11.3813),   # atvls Valluga
-    # Belgium (BE) - 2 radars
-    (51.1919, 3.0644),    # bejab Jabbeke
-    (50.1138, 5.5049),    # bewid Wideumont
-    # Bulgaria (BG) - 3 radars
-    (42.653, 25.556),     # bgbot Botev Peak
-    (42.65, 23.39),       # bgvar Varna approach
-    (43.41, 27.89),       # bgvrs Varna/Shabla
-    # Croatia (HR) - 3 radars
-    (43.7525, 16.4622),   # hrbiok Biokovo
-    (44.884, 13.921),     # hrpun Puntijarka
-    (45.6, 16.05),        # hrlip Lipik
-    # Cyprus (CY) - 1 radar
-    (34.8833, 32.65),     # cynic Nicosia
-    # Czech Republic (CZ) - 2 radars
-    (49.658, 15.847),     # czbrd Brdy
-    (49.7308, 13.818),    # czska Skalky
-    # Denmark (DK) - 5 radars
-    (55.3261, 12.4494),   # dkste Stevns
-    (57.4872, 10.1389),   # dksin Sindal
-    (55.1731, 8.5521),    # dkrom Rømø
-    (56.0178, 10.0213),   # dkvir Virring
-    (55.1128, 14.8821),   # dkbor Bornholm
+    # Belgium (BE) - 3 radars
+    (51.0702, 5.4054),    # behel Helchteren
+    (51.1919, 3.0641),    # bejab Jabbeke
+    (49.9135, 5.5044),    # bewid Wideumont
+    # Croatia (HR) - 6 radars
+    (45.8835, 17.2005),   # hrbil Bilogora
+    (44.0455, 15.3765),   # hrdeb Debeljak
+    (45.0205, 14.1223),   # hrgol Goli
+    (45.1592, 18.7033),   # hrgra Gradište
+    (45.9078, 15.9683),   # hrpun Puntijarka
+    (42.8944, 17.4783),   # hrulj Uljenje
+    # Czechia (CZ) - 2 radars
+    (49.6583, 13.8178),   # czbrd Brdy-Praha
+    (49.5011, 16.7885),   # czska Skalky
+    # Denmark (DK) - 4 radars
+    (55.1127, 14.8875),   # dkbor Bornholm
+    (55.1731, 8.5520),    # dkrom Römö
+    (57.4893, 10.1365),   # dksin Sindal
+    (55.3262, 12.4493),   # dkste Stevns
     # Estonia (EE) - 2 radars
-    (58.4819, 24.4831),   # eesur Sürgavere
-    (57.8124, 26.6524),   # eehar Harku area
-    # Finland (FI) - 10 radars
-    (60.2706, 24.8694),   # fivan Vantaa
-    (60.1285, 21.6434),   # fikor Korppoo
-    (60.9039, 26.9611),   # fianj Anjalankoski
-    (61.7673, 23.0764),   # fiika Ikaalinen
+    (59.3971, 24.6021),   # eehar Harku
+    (58.4823, 25.5187),   # eesur Sürgavere
+    # Finland (FI) - 12 radars
+    (60.9039, 27.1081),   # fianj Anjalankoski
+    (61.8108, 22.5020),   # fikan Kankaanpää
+    (68.4344, 27.4440),   # fikau Kaunispää
+    (61.9069, 29.7977),   # fikes Kesälahti
+    (60.1285, 21.6434),   # fikor Korpo
     (62.8626, 27.3815),   # fikuo Kuopio
-    (63.104, 23.822),     # fivim Vimpeli
+    (67.1391, 26.8969),   # filuo Luosto
+    (63.8378, 29.4489),   # finur Nurmes
+    (62.3045, 25.4401),   # fipet Petäjävesi
     (64.7749, 26.3189),   # fiuta Utajärvi
-    (67.1386, 26.8969),   # filuo Luosto
-    (62.3045, 25.4413),   # fipet Petäjävesi
-    (69.3209, 25.7819),   # fikil Kilpisjärvi area
-    # France (FR) - 7 radars
-    (49.2147, 2.6336),    # frtro Trappes
-    (48.7108, -3.5669),   # frtpz Plouzané
-    (43.9403, 3.0178),    # frnms Nîmes
-    (43.629, 1.3814),     # frtls Toulouse/Blagnac
-    (44.83, -0.691),      # frbdx Bordeaux/Mérignac
-    (47.3514, 2.2633),    # frbou Bourges
-    (48.447, 7.636),      # frstg Strasbourg
+    (60.5562, 24.4956),   # fivih Vihti
+    (63.1048, 23.8209),   # fivim Vimpeli
+    # France (FR) - 25 radars
+    (50.1360, 1.8347),    # frabb Abbeville
+    (41.9531, 8.7005),    # fraja Ajaccio
+    (42.1298, 9.4964),    # frale Aléria
+    (50.1283, 3.8118),    # frave Avesnes
+    (47.3552, 4.7759),    # frbla Blaisy-Haut
+    (44.3230, 4.7621),    # frbol Bollène
+    (44.8315, -0.6919),   # frbor Bordeaux
+    (47.0586, 2.3595),    # frbou Bourges
+    (48.9272, -0.1496),   # frcae Falaise
+    (43.2166, 6.3729),    # frcol Collobrières
+    (45.1044, 1.3697),    # frgre Grèzes
+    (45.2892, 3.7095),    # frlep Sembadel
+    (44.0128, 6.5292),    # frmau Mont Maurel
+    (43.9905, 2.6096),    # frmcl Montclar
+    (43.6245, -0.6094),   # frmom Momuy
+    (47.3686, 7.0190),    # frmtc Montancy
+    (48.7158, 6.5816),    # frnan Nancy
+    (43.8061, 4.5027),    # frnim Nîmes
+    (46.0678, 4.4453),    # frniz Saint Nizier
+    (42.9184, 2.8650),    # fropo Opoul
+    (48.4609, -4.4298),   # frpla Plabennec
+    (43.5743, 1.3763),    # frtou Toulouse
+    (48.7746, 2.0083),    # frtra Trappes
+    (47.3374, -1.6563),   # frtre Treillères
+    (48.4621, 4.3093),    # frtro Arcis-sur-Aube
     # Germany (DE) - 17 radars
-    (54.004, 10.047),     # deBoo Boostedt
-    (52.648, 13.858),     # dePro Prötzel
-    (52.160, 11.176),     # deUmm Ummendorf
-    (51.124, 13.769),     # deDrs Dresden
-    (51.405, 6.967),      # deEss Essen
-    (50.500, 11.135),     # deNeu Neuhaus
-    (50.110, 8.714),      # deOff Offenthal
-    (49.541, 12.403),     # deEis Eisberg
-    (49.541, 6.548),      # deNhb Neuheilenbach
-    (48.175, 12.101),     # deIse Isen
-    (48.585, 9.783),      # deTur Türkheim
-    (47.874, 8.006),      # deFdb Feldberg
-    (54.173, 12.058),     # deRos Rostock
-    (53.339, 7.024),      # deEmd Emden
-    (52.460, 9.694),      # deHan Hannover
-    (51.311, 8.802),      # deFle Flechtdorf
-    (49.985, 8.712),      # deOfb Offenbach
-    # Greece (GR) - 3 radars
-    (40.5817, 22.9833),   # grthe Thessaloniki
-    (38.035, 23.875),     # graeg Aegina area
-    (35.3333, 24.4),      # grcre Crete
+    (53.5640, 6.7482),    # deasb Isle of Borkum
+    (54.0043, 10.0468),   # deboo Boostedt
+    (51.1246, 13.7686),   # dedrs Dresden
+    (49.5407, 12.4028),   # deeis Eisberg
+    (51.4055, 6.9669),    # deess Essen
+    (47.8736, 8.0039),    # defbg Feldberg
+    (51.3112, 8.8020),    # defld Flechtdorf
+    (52.4600, 9.6945),    # dehnr Hannover
+    (48.1747, 12.1017),   # deisn Isen/München
+    (48.0421, 10.2192),   # demem Memmingen
+    (50.5001, 11.1351),   # deneu Neuhaus
+    (50.1097, 6.5483),    # denhb Neuheilenbach
+    (49.9847, 8.7129),    # deoft Offenthal
+    (52.6486, 13.8580),   # depro Protzel/Berlin
+    (54.1757, 12.0580),   # deros Rostock
+    (48.5853, 9.7828),    # detur Tuerkheim
+    (52.1601, 11.1761),   # deumd Ummendorf
+    # Greece (GR) - 5 radars
+    (38.9166, 20.7528),   # grakt Aktio
+    (37.9261, 21.2894),   # grand Andravida
+    (39.6446, 22.4603),   # grlar Larisa
+    (40.5282, 22.9757),   # grthe Thessaloniki
+    (37.9461, 23.8138),   # grymi Ymittos
     # Hungary (HU) - 5 radars
     (47.4294, 19.1817),   # hubud Budapest
-    (46.1775, 18.3372),   # huhar Harkány
+    (46.1775, 18.3372),   # huhar Harmashegy
     (47.9622, 21.8867),   # hunap Napkor
-    (46.6604, 17.0624),   # hupog Pogányvár
-    (46.6397, 20.4325),   # husze Szeged
-    # Iceland (IS) - 1 radar
-    (63.965, -22.455),    # iskef Keflavík
+    (46.6604, 17.0624),   # hupog Poganyvar
+    (46.6397, 20.4325),   # husze Szentes
+    # Iceland (IS) - 3 radars
+    (65.2658, -14.0618),  # isbjo Bjolfur
+    (64.0257, -22.6353),  # iskef Keflavik
+    (66.0557, -20.2680),  # isska Skagi
     # Ireland (IE) - 2 radars
-    (53.4264, -6.2569),   # iedub Dublin
-    (51.9411, -8.2031),   # iesha Shannon
-    # Italy (IT) - 5 radars
-    (44.6547, 11.6236),   # itspc S. Pietro Capofiume
-    (40.625, 16.2656),    # itmtm Monte Macchia/Matera
-    (38.3075, 16.0644),   # itlam Lamezia Terme
-    (41.8736, 12.6506),   # itrom Roma Pratica
-    (45.3458, 11.425),    # ittes Teolo area
-    # Latvia (LV) - 1 radar
-    (56.9628, 24.1208),   # lvrig Riga
-    # Lithuania (LT) - 1 radar
-    (55.7028, 23.8825),   # ltlau Laukuva
+    (53.4299, -6.2443),   # iedub Dublin
+    (52.6928, -8.9201),   # iesha Shannon
+    # Latvia (LV) - 1 radars
+    (56.9143, 23.9897),   # lvrix Riga
+    # Lithuania (LT) - 2 radars
+    (55.6090, 22.2395),   # ltlau Laukuva
+    (54.6262, 25.1067),   # ltvil Vilnius
+    # Malta (MT) - 1 radars
+    (35.8529, 14.4748),   # mtgud Gudja
     # Netherlands (NL) - 2 radars
-    (51.8371, 5.1381),    # nldbl De Bilt
     (52.9528, 4.7906),    # nldhl Den Helder
-    # Norway (NO) - 11 radars
-    (59.79, 5.23),        # nobml Bømlo
-    (61.21, 11.50),       # nohhf Hafjell
-    (63.69, 10.20),       # norsa Rissa
-    (70.86, 29.02),       # nober Berlevåg
-    (69.26, 16.01),       # noand Andøya
-    (59.62, 10.55),       # nohur Hurum
-    (62.10, 5.11),        # nostad Stad
-    (59.38, 10.78),       # noryg Rygge
-    (67.53, 12.10),       # norost Røst
-    (70.58, 22.13),       # nohas Hasvik
-    (65.37, 12.22),       # nosom Sømna
-    # Poland (PL) - 8 radars
-    (53.7914, 15.8311),   # plpas Pastewnik
-    (51.1133, 16.0394),   # plram Ramża
-    (50.1142, 20.9606),   # plbrz Brzuchania
-    (51.7831, 19.8367),   # plleg Legionowo area
-    (53.5314, 18.5297),   # plpoz Poznań area
-    (50.1181, 22.7044),   # plrze Rzeszów
-    (54.3828, 18.4561),   # plgda Gdańsk
-    (52.4222, 20.9611),   # plwar Warsaw area
-    # Portugal (PT) - 3 radars
-    (37.27, -7.97),       # ptfar Faro
-    (39.0714, -8.4001),   # ptlis Lisbon/Coruche
-    (40.845, -8.2797),    # ptprt Porto/Arouca
-    # Romania (RO) - 5 radars
-    (45.503, 25.367),     # robog Bobohalma
-    (44.486, 26.077),     # robuc Bucharest
-    (47.247, 23.744),     # rotgm Târgu Mureș
-    (44.713, 21.333),     # roors Oravița
-    (47.533, 25.917),     # robar Bărăbanț
-    # Serbia (RS) - 4 radars
-    (43.5558, 20.7006),   # rsval Valjevo area
-    (44.7558, 20.9378),   # rsbeo Belgrade
-    (44.17, 22.56),       # rsnel Negotin area
-    (45.2372, 19.7856),   # rsnsa Novi Sad area
+    (51.8371, 5.1380),    # nlhrw Herwijnen
+    # Norway (NO) - 12 radars
+    (69.2414, 16.0030),   # noand Andoya
+    (70.5107, 29.0184),   # nober Berlevaag
+    (59.8537, 5.0896),    # nobml Boemlo
+    (70.6052, 22.4430),   # nohas Hasvik
+    (61.2318, 10.5273),   # nohfj Hafjell
+    (58.3601, 7.1648),    # nohgb Haegebostad
+    (59.6272, 10.5645),   # nohur Hurum
+    (63.6905, 10.2039),   # norsa Rissa
+    (69.2186, 23.4398),   # norsg Rassegalvarri
+    (67.5304, 12.0989),   # norst Rost
+    (65.2199, 11.9925),   # nosmn Soemna
+    (62.1871, 5.1275),    # nosta Stad
+    # Poland (PL) - 10 radars
+    (50.3942, 20.0832),   # plbrz Brzuchania
+    (54.5009, 18.2718),   # plgdy Gdynia-Szemud
+    (50.4639, 18.1532),   # plgsa Góra Św. Anny
+    (52.4053, 20.9611),   # plleg Legionowo
+    (50.8925, 16.0395),   # plpas Pastewnik
+    (52.4133, 16.7970),   # plpoz Poznań
+    (50.1513, 18.7251),   # plram Ramża
+    (50.1141, 22.0370),   # plrze Rzeszów
+    (53.7958, 15.8368),   # plswi Świdwin
+    (53.8565, 21.4121),   # pluzr Uzranki
+    # Portugal (PT) - 6 radars
+    (37.3041, -7.9530),   # ptfar Loulé/Cavalos do Caldeirão
+    (39.4634, -31.2200),  # ptflr Flores/Morro Alto
+    (39.0714, -8.4001),   # ptlis Coruche/Cruz do Leão
+    (40.8450, -8.2797),   # ptprt Arouca/Pico do Gralheiro
+    (37.8191, -25.7516),  # ptsmg São Miguel/Pico Santos de Cima
+    (38.7302, -27.3208),  # pttrc Terceira/ Santa Barbara
+    # Romania (RO) - 7 radars
+    (47.0118, 27.5826),   # robar Barnova
+    (46.3602, 24.2252),   # robob Bobohalma
+    (44.5127, 26.0773),   # robuc Bucuresti
+    (44.3103, 23.8674),   # rocra Craiova
+    (44.2434, 28.2506),   # romed Medgidia
+    (47.0922, 21.9429),   # roora Oradea
+    (45.7717, 21.2577),   # rotim Timisoara
+    # Serbia (RS) - 3 radars
+    (45.1573, 19.8109),   # rsfrg Fruska gora
+    (43.3913, 21.4436),   # rsjas Jastrebac
+    (45.1876, 20.7707),   # rssam Samos
     # Slovakia (SK) - 4 radars
-    (48.2558, 17.1524),   # skjav Javorniky/Bratislava
-    (48.7822, 20.9881),   # skkoj Kojšovská hoľa
-    (49.2757, 19.2823),   # skkub Kubínska hoľa
-    (48.2331, 19.2561),   # sklaz Lazy pod Makytou
-    # Slovenia (SI) - 1 radar
-    (46.0667, 14.2167),   # silis Lisca
+    (48.2556, 17.1524),   # skjav Maly Javornik
+    (48.7827, 20.9873),   # skkoj Kojsovska hola
+    (49.2717, 19.2494),   # skkub Kubinska hola
+    (48.2404, 19.2573),   # sklaz Spani laz
+    # Slovenia (SI) - 2 radars
+    (46.0680, 15.2850),   # silis Lisca
+    (46.0980, 14.2283),   # sipas Pasja ravan
     # Spain (ES) - 15 radars
-    (43.49, -8.42),       # eslcd La Coruña
-    (39.9311, -4.0356),   # esccl Cáceres area
-    (41.8767, -3.27),     # eslab Labastida area
-    (38.8919, -1.1756),   # esval Valencia area
-    (37.88, -3.63),       # esalm Almería approach
-    (36.61, -4.66),       # esahr Alhaurín el Grande (Málaga)
-    (41.41, 1.88),        # esgld El Grao/Lleida area
-    (43.44, -6.30),       # essan Santander area
-    (39.43, -6.29),       # essft San Fernando de Henares
-    (43.39, -2.84),       # essse San Sebastián
-    (40.18, -3.71),       # estjv Torrejón de Velasco
-    (39.16, -0.25),       # esval Valencia
-    (28.5, -16.1),        # esizn Izaña (Tenerife)
-    (39.56, 2.63),        # espal Palma de Mallorca
-    (42.47, -7.86),       # esour Ourense
+    (36.6133, -4.6593),   # esahr Alhaurin el Grande (Malaga)
+    (36.8324, -2.0821),   # esalm Nijar (Almeria)
+    (43.1690, -8.5269),   # escor Cerceda ( La Coruna)
+    (41.4081, 1.8848),    # esgld Gelida (Barcelona)
+    (41.9956, -4.6028),   # eslid Autilla Pino (Palencia)
+    (28.0186, -15.6144),  # eslpa Artenara (Gran Canaria)
+    (38.2644, -1.1897),   # esmur Fortuna (Murcia)
+    (39.3797, 2.7851),    # espma Llucmajor (Baleares)
+    (43.4625, -6.3019),   # essan Aguión (Asturias)
+    (37.6887, -6.3331),   # essev Castillo las Guardas (Sevilla)
+    (39.4288, -6.2853),   # essft Sierra de Fuentes (Caceres)
+    (43.4033, -2.8419),   # essse Baquio (Vizcaya)
+    (40.1759, -3.7136),   # estjv Torrejon de Velasco (Madrid)
+    (39.1761, -0.2521),   # esval Cullera (Valencia)
+    (41.7339, -0.5459),   # eszar Perdiguera (Zaragoza)
     # Sweden (SE) - 12 radars
-    (67.85, 20.42),       # sekir Kiruna
-    (65.43, 22.13),       # selul Luleå
-    (63.30, 14.50),       # seosd Östersund
-    (61.58, 16.72),       # sehud Hudiksvall
-    (60.72, 14.88),       # selek Leksand
-    (63.40, 18.60),       # seorn Örnsköldsvik
-    (59.65, 17.95),       # searl Arlanda
-    (56.30, 15.61),       # sekar Karlskrona
-    (58.25, 12.83),       # sevar Vara
-    (58.11, 15.95),       # sevil Vilebo
-    (56.37, 12.85),       # seang Ängelholm
-    (57.25, 16.15),       # seasi Ase
+    (56.3675, 12.8517),   # seang Ängelholm
+    (58.1059, 15.9365),   # seatv Åtvidaberg (Vilebo)
+    (59.6110, 17.5833),   # sebaa Bålsta
+    (57.3035, 18.4001),   # sehem Hemse (Ase)
+    (61.5771, 16.7144),   # sehuv Hudiksvall
+    (56.2955, 15.6102),   # sekaa Karlskrona
+    (67.7088, 20.6178),   # sekrn Kiruna
+    (60.7230, 14.8776),   # selek Leksand
+    (65.4309, 21.8650),   # sella Luleå (Rosvik)
+    (63.6395, 18.4019),   # seoer Örnsköldsvik
+    (63.2951, 14.7591),   # seosd Östersund
+    (58.2556, 12.8260),   # sevax Vara
     # Switzerland (CH) - 5 radars
-    (46.0408, 8.8331),    # chmon Monte Lema
-    (46.425, 6.1006),     # chdol La Dôle
-    (46.3706, 7.4869),    # chple Plaine Morte
-    (46.8131, 9.7944),    # chwea Weissfluh
-    (47.2842, 8.512),     # chalb Albis
-    # Turkey is NOT an OPERA member: the Turkish State Meteorological
-    # Service (MGM) operates ~25 radars but they don't feed into OPERA
-    # CIRRUS, so including them here would falsely suppress IFS
-    # fallback across Turkey.  See the EUMETNET OPERA Database:
-    # https://www.eumetnet.eu/wp-content/themes/aeron-child/observations-programme/current-activities/opera/database/OPERA_Database/index.html
+    (47.2843, 8.5120),    # chalb Albis
+    (46.4251, 6.0994),    # chdol La Dole
+    (46.0408, 8.8332),    # chlem Monte Lema
+    (46.3706, 7.4866),    # chppm Plaine Monte
+    (46.8350, 9.7945),    # chwei Weissfluhgiptel
     # United Kingdom (UK) - 16 radars
-    (54.50, -6.34),       # ukcas Castor Bay
-    (51.6892, -0.5306),   # ukche Chenies
-    (52.3981, -2.5969),   # ukcle Clee Hill
-    (50.9633, -3.4528),   # ukcob Cobbacombe
-    (51.9797, -4.4447),   # ukcyg Crug-y-Gorllwyn
-    (51.0306, -1.6544),   # ukdea Dean Hill
-    (57.4308, -2.0361),   # ukdud Dudwick
-    (53.7547, -2.2886),   # ukham Hameldon Hill
-    (56.0183, -4.2189),   # ukhhd High Moorsley
-    (54.8056, -1.4756),   # ukhmy Holme Moss
-    (53.335, -0.5592),    # uking Ingham
-    (49.2094, -2.1989),   # ukjer Jersey
-    (58.2111, -6.1831),   # uklew Stornoway
-    (56.2147, -3.3106),   # ukmun Munduff Hill
-    (50.0033, -5.2225),   # ukpre Predannack
-    (51.2947, 0.6042),    # ukthu Thurnham
+    (54.5020, -6.3429),   # ukcas Castor Bay
+    (51.6895, -0.5302),   # ukche Chenies
+    (52.3986, -2.5954),   # ukcle Clee Hill
+    (50.9639, -3.4521),   # ukcob Cobbacombe Cross
+    (51.9798, -4.4446),   # ukcyg Crug y Gorllwyn
+    (51.0307, -1.6534),   # ukdea Dean Hill
+    (57.4304, -2.0367),   # ukdud Hill Of Dudwick
+    (53.7548, -2.2892),   # ukham Hameldon Hill
+    (56.0180, -4.2171),   # ukhhd Holehead
+    (54.8034, -1.4746),   # ukhmy High Moorsley
+    (53.3347, -0.5594),   # uking Ingham
+    (49.1772, -2.2239),   # ukjer Jersey
+    (58.2117, -6.1821),   # uklew Druim A'Starraig
+    (56.2148, -3.3118),   # ukmun Munduff Hill
+    (50.0034, -5.2230),   # ukpre Predannack
+    (51.2948, 0.6043),    # ukthu Thurnham
 ]
 
 
