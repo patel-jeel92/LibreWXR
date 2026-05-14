@@ -4,17 +4,30 @@ All settings are configured via environment variables prefixed with `LIBREWXR_` 
 
 LibreWXR uses [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) for configuration. Environment variables take precedence over `.env` file values.
 
+This document is the **full** reference for every setting LibreWXR understands. The trimmed `.env.example` only covers the commonly-tuned subset; the advanced knobs (per-source publish delays, dBZ calibration offsets, source base URLs) are documented here.
+
 ## Table of Contents
 
 - [Server](#server)
 - [Radar Data](#radar-data)
 - [Regions](#regions)
 - [Tile Rendering](#tile-rendering)
-- [ECMWF Global Fallback](#ecmwf-global-fallback)
+- [Workers and Memory](#workers-and-memory)
+- [Multi-worker Tile-Server Split](#multi-worker-tile-server-split)
+- [ECMWF IFS Global Coverage](#ecmwf-ifs-global-coverage)
+- [Regional NWP Sources](#regional-nwp-sources)
+  - [North American: HRRR / HRRR-Alaska](#north-american-hrrr--hrrr-alaska)
+  - [North American: HRDPS](#north-american-hrdps)
+  - [European: DMI DINI + ICON-EU](#european-dmi-dini--icon-eu)
+  - [Caribbean: AROME Antilles](#caribbean-arome-antilles)
+  - [South American: WRF-SMN](#south-american-wrf-smn)
 - [Nowcasting](#nowcasting)
-- [Performance and Memory](#performance-and-memory)
+- [Satellite (IFS-Derived Clouds)](#satellite-ifs-derived-clouds)
+- [Weather Alerts (WMO CAP)](#weather-alerts-wmo-cap)
+- [Persistent Cache](#persistent-cache)
+- [Performance and Reliability](#performance-and-reliability)
+- [Tile Request Tracking](#tile-request-tracking)
 - [RAM Sizing Guide](#ram-sizing-guide)
-- [Scaling](#scaling)
 - [Example Configurations](#example-configurations)
 
 ---
@@ -54,19 +67,6 @@ Set this to whatever URL users will use to reach your instance (e.g., your domai
 ```bash
 LIBREWXR_PUBLIC_URL=https://radar.example.com
 ```
-
-### `LIBREWXR_WORKERS`
-
-Number of uvicorn worker processes. Each worker is a fully independent copy of LibreWXR with its own frame store, caches, and fetcher.
-
-More workers improve concurrency for simultaneous users, but each uses significant RAM (frames + coordinate caches + tile cache). A caching reverse proxy in front of LibreWXR will do more for scalability than adding workers — tiles are already served with `Cache-Control: public, max-age=300`.
-
-| | |
-|---|---|
-| **Default** | `1` |
-| **Type** | integer |
-
-**Guideline:** 1 worker per 2 CPU cores. See [Scaling](#scaling) for detailed recommendations.
 
 ### `LIBREWXR_CORS_ORIGINS`
 
@@ -116,7 +116,7 @@ More frames = longer animation history = more RAM usage.
 Data source for North American radar composites (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP, and CACOMP). Three modes:
 
 - **`mrms_fallback`** (default) — NCEP MRMS quality-controlled mosaics as the primary source, with IEM NEXRAD fallback for US regions and MSC blending for Canadian gaps. Best coverage: MRMS includes Canadian radar ingest and quality control. IEM is only fetched when MRMS fails for a specific frame.
-- **`mrms`** — NCEP MRMS only, no fallback or blending. Pure MRMS where available; gaps show as empty (ECMWF IFS global fallback still fills in outside radar coverage). Least bandwidth.
+- **`mrms`** — NCEP MRMS only, no fallback or blending. Pure MRMS where available; gaps show as empty (the global ECMWF IFS layer still fills in outside radar coverage). Least bandwidth.
 - **`iem`** — Legacy mode. IEM NEXRAD N0Q for US regions, MSC GeoMet standalone for Canada. NEXRAD-only without Canadian radar ingest. Simplest and most battle-tested, but fewer radars and no QC.
 
 | | |
@@ -155,6 +155,19 @@ Base URL for the Environment and Climate Change Canada MSC GeoMet WMS service (C
 |---|---|
 | **Default** | `https://geo.weather.gc.ca` |
 | **Type** | string |
+
+### `LIBREWXR_OPERA_BASE_URL`
+
+Base URL for the OPERA CIRRUS composite S3 bucket (European radar via MeteoGate).
+
+| | |
+|---|---|
+| **Default** | `https://s3.waw3-1.cloudferro.com` |
+| **Type** | string |
+
+---
+
+## Regions
 
 ### `LIBREWXR_ENABLED_REGIONS`
 
@@ -197,15 +210,6 @@ LIBREWXR_ENABLED_REGIONS=CONUS,EUROPE     # Continental US + Europe
 LIBREWXR_ENABLED_REGIONS=US,CANADA        # US + Canada
 LIBREWXR_ENABLED_REGIONS=ALL              # Everything
 ```
-
-### `LIBREWXR_OPERA_BASE_URL`
-
-Base URL for the OPERA CIRRUS composite S3 bucket (European radar via MeteoGate).
-
-| | |
-|---|---|
-| **Default** | `https://s3.waw3-1.cloudferro.com` |
-| **Type** | string |
 
 ---
 
@@ -269,19 +273,196 @@ WebP encoding quality for tiles requested in `.webp` format. Does not affect PNG
 
 | | |
 |---|---|
-| **Default** | `80` |
+| **Default** | `65` |
 | **Type** | integer |
 | **Range** | 1 - 100 |
 
 - `100` = lossless (best quality, larger files)
-- `80` = lossy (visually identical for radar imagery, ~3-4x smaller than PNG)
-- `1-79` = increasingly lossy
+- `65` = lossy (visually identical for radar imagery, ~4-6x smaller than PNG)
+- `1-64` = increasingly lossy
+
+### `LIBREWXR_TILE_CACHE_MB`
+
+Maximum tile cache size in megabytes, **per worker**. The cache stores rendered tile images (PNG/WebP bytes) and evicts the oldest entries when this byte limit is reached.
+
+Higher values mean faster tile serving for repeat requests; lower values save RAM. In multi-worker mode the default is reduced to 64 MB per worker (set via `docker-compose.multiworker.yml`) since many workers share the rack.
+
+| | |
+|---|---|
+| **Default** | `200` |
+| **Type** | integer |
+| **Unit** | megabytes |
+
+### `LIBREWXR_COORD_CACHE_SIZE`
+
+Maximum entries per coordinate LRU cache, **per worker**. Controls how many tile-coordinate mappings are kept in memory. There are 6 internal coordinate caches, and each entry is 0.5-2 MB depending on tile size.
+
+These caches are the largest RAM consumer after frame data. Reducing this saves significant RAM at the cost of occasional recomputation (~5-20 ms per cache miss). In multi-worker mode the default is reduced to 256 per worker.
+
+| | |
+|---|---|
+| **Default** | `2048` |
+| **Type** | integer |
+
+### `LIBREWXR_WARMER_THREADS`
+
+Thread pool size for background tile cache warming, **per worker**. When a tile is requested, the warmer pre-renders that same tile position for all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand.
+
+| | |
+|---|---|
+| **Default** | `0` (auto: CPU count - 1) |
+| **Type** | integer |
+
+In multi-worker mode the default is reduced to 4 per worker — many workers each with a full thread pool would oversubscribe the rack.
+
+### `LIBREWXR_WARM_COORD_ZOOM`
+
+Pre-warm coordinate caches up to this zoom level at startup. Coordinate caches store tile-to-region pixel index mappings; warming them eliminates cold-start latency from trigonometric projections.
+
+| | |
+|---|---|
+| **Default** | `6` |
+| **Type** | integer |
+
+Each zoom level adds ~4x the tiles of the previous (zoom 6 = ~5,500 tiles). Set to `0` to disable.
+
+### `LIBREWXR_WARM_OVERVIEW_ZOOM`
+
+Pre-render overview tiles up to this zoom level after each fetch cycle. Ensures zoomed-out views are served instantly from cache.
+
+| | |
+|---|---|
+| **Default** | `4` |
+| **Type** | integer |
+
+At zoom 4, ~341 tiles per timestamp. Set to `-1` to disable.
+
+### `LIBREWXR_WARM_OVERVIEW_ZOOM_REGIONAL`
+
+Pre-render higher-zoom tiles ONLY where they overlap an enabled region's bounding box. Skips ocean / desert / unpopulated tiles that no one would zoom into.
+
+Applies between `LIBREWXR_WARM_OVERVIEW_ZOOM` (exclusive) and this value (inclusive).
+
+| | |
+|---|---|
+| **Default** | `6` |
+| **Type** | integer |
+
+Set to `-1` (or any value `<= warm_overview_zoom`) to disable. At zoom 6 with all regions enabled, the filter typically drops 80-85% of tiles.
 
 ---
 
-## ECMWF Global Fallback
+## Workers and Memory
 
-LibreWXR uses ECMWF IFS 9km global precipitation data from [Open-Meteo](https://open-meteo.com/) S3 to fill in worldwide coverage where no radar composite exists. This provides global precipitation display (at lower resolution than radar) and per-pixel snow/rain classification.
+### `LIBREWXR_WORKERS`
+
+Number of uvicorn worker processes.
+
+| | |
+|---|---|
+| **Default** | `1` |
+| **Type** | integer |
+
+- **Single-process mode** (`docker-compose.yml`): each worker is a fully independent copy of LibreWXR with its own frame store, caches, and fetcher. More workers = more concurrency at ~1.3 GB+ RAM each. Recommended: 1 worker per 2 CPU cores; put a caching proxy in front for high traffic.
+- **Multi-worker mode** (`docker-compose.multiworker.yml`): render workers share radar/NWP/cloud state via memmap snapshots written by a sidecar `data-pipeline` process. Scale workers across many cores without the per-worker data RAM cost — total RSS ≈ workers × (interpreter ~80 MB + tile cache + coord cache) + a single shared page-cache backing the memmap. Recommended: 8-32 workers depending on rack size.
+
+### `LIBREWXR_MEMORY_LIMIT_MB`
+
+Memory limit in MB for the in-process memory pressure monitor. When RSS usage exceeds 85% of this limit, the tile cache and coordinate caches are automatically trimmed.
+
+| | |
+|---|---|
+| **Default** | `0` (auto-detect) |
+| **Type** | integer |
+| **Unit** | megabytes |
+
+When set to `0`, the limit is auto-detected from Docker/cgroup limits or falls back to system RAM.
+
+### `LIBREWXR_MEMORY_PRESSURE_CHECK_INTERVAL`
+
+Seconds between memory pressure checks.
+
+| | |
+|---|---|
+| **Default** | `30` |
+| **Type** | integer |
+| **Unit** | seconds |
+
+### Docker memory limits
+
+The compose files cap the containers using these env vars (not LIBREWXR_* settings — they're consumed by `deploy.resources.limits` in the YAML directly):
+
+| Var | Default | Compose file |
+|---|---|---|
+| `LIBREWXR_MEMORY` | `7G` | `docker-compose.yml` (single-container) |
+| `LIBREWXR_PIPELINE_MEMORY` | `12G` | `docker-compose.multiworker.yml` (pipeline container) |
+| `LIBREWXR_RENDER_MEMORY` | `18G` | `docker-compose.multiworker.yml` (render container) |
+
+Production observation on an 80-core / 32 GB rack with multi-worker mode (32 render workers): ~16 GB total RSS settled across both containers under continuous traffic.
+
+---
+
+## Multi-worker Tile-Server Split
+
+Runs the data pipeline as one process and N tile-server worker processes alongside it, all sharing `LIBREWXR_CACHE_DIR` via memmap files + a single `state.json` snapshot. Bypasses Python's GIL on the tile-render path so the rack's full core count can actually do work.
+
+To enable:
+1. Set `LIBREWXR_CACHE_DIR` to a shared directory (required).
+2. Use `docker-compose.multiworker.yml`, or run the two processes manually:
+   ```bash
+   python -m librewxr.data_pipeline                       # sidecar
+   LIBREWXR_RENDER_ONLY=1 LIBREWXR_WORKERS=N \
+     python -m librewxr.main                              # tile server
+   ```
+
+### `LIBREWXR_RENDER_ONLY`
+
+When `true` (or `1`), the worker skips fetcher / NWP grid / cloud / nowcast initialization entirely. It only memory-maps the snapshot the pipeline writes and renders tiles from it.
+
+| | |
+|---|---|
+| **Default** | `false` |
+| **Type** | boolean |
+
+### `LIBREWXR_STATE_POLL_INTERVAL`
+
+Seconds between `state.json` mtime polls in render-only mode. The pipeline rewrites `state.json` once per `LIBREWXR_FETCH_INTERVAL` (default 600 s), so 1 s polls are responsive without burning CPU.
+
+| | |
+|---|---|
+| **Default** | `1.0` |
+| **Type** | float |
+| **Unit** | seconds |
+
+### `LIBREWXR_STATE_WAIT_TIMEOUT`
+
+Seconds for render workers to wait for the first `state.json` on cold start before failing loudly. `0` = wait forever.
+
+| | |
+|---|---|
+| **Default** | `300` |
+| **Type** | float |
+| **Unit** | seconds |
+
+---
+
+## ECMWF IFS Global Coverage
+
+LibreWXR uses ECMWF IFS 9 km global data from [Open-Meteo](https://open-meteo.com/) S3 as the global base layer of its NWP chain. IFS provides:
+
+- Precipitation animation everywhere the regional NWP chain doesn't reach
+- Per-pixel snow/rain classification
+- Cloud cover for the IR-like satellite tile layer
+- Nowcast extrapolation outside regional model coverage
+
+### `LIBREWXR_ECMWF_ENABLED`
+
+Disable ECMWF IFS entirely. Useful only for isolating regional NWP layers during debugging — anywhere outside the regional models will then simply show zero precipitation and no satellite cloud.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
 
 ### `LIBREWXR_ECMWF_S3_BUCKET`
 
@@ -322,42 +503,299 @@ Snowfall fraction threshold for per-pixel snow/rain classification. When the sno
 
 ### `LIBREWXR_ECMWF_MAX_TIMESTEPS`
 
-Number of ECMWF IFS hourly timesteps to fetch for global fallback animation.
+Number of ECMWF IFS hourly timesteps to fetch for global precipitation animation.
 
 | | |
 |---|---|
 | **Default** | `0` (auto) |
 | **Type** | integer |
 
-When set to `0` (recommended), the count is derived automatically from `LIBREWXR_MAX_FRAMES` so ECMWF animation covers the same time window as radar. The formula is `ceil(max_frames / 6) + 1`, plus extra hours when nowcast is enabled to cover the forecast window.
-
-At the default 10-min cadence:
-- 12 frames (2h) = 3 timesteps
-- 18 frames (3h) = 4 timesteps
-- 24 frames (4h) = 5 timesteps
-
-Each timestep adds ~13 MB RAM and ~1-2 seconds to fetch time. Set to `1` for a static single snapshot.
+When set to `0` (recommended), the count is derived automatically from `LIBREWXR_MAX_FRAMES` + nowcast frames so the IFS animation covers the same time window as radar.
 
 ### `LIBREWXR_ECMWF_INTERPOLATION`
 
-Enable optical flow interpolation of ECMWF IFS hourly data to 10-minute frames. Uses dense motion vectors (OpenCV Farneback) to animate precipitation movement between IFS hours, so the global fallback animates smoothly like real radar data instead of jumping hour-to-hour.
+Enable optical flow interpolation of ECMWF IFS hourly data to 10-minute frames. Uses dense motion vectors (OpenCV Farneback) to animate precipitation movement between IFS hours, so the global IFS layer animates smoothly like real radar data instead of jumping hour-to-hour.
 
 | | |
 |---|---|
 | **Default** | `true` |
 | **Type** | boolean |
 
-Adds ~130 MB RAM for synthetic frames and ~5-10 seconds of compute per IFS fetch cycle. Disable to have IFS data snap to the nearest hour (visually jumpier but lighter on resources).
+Adds ~130 MB RAM for synthetic frames and ~5-10 seconds of compute per IFS fetch cycle.
+
+---
+
+## Regional NWP Sources
+
+LibreWXR layers a chain of regional rapid-refresh NWP models on top of the global ECMWF IFS layer. At each pixel, the chain dispatches to the **narrowest** model whose domain covers it, soft-feathering at every domain edge so seams don't show.
+
+Each regional source supports the same set of advanced tuning knobs:
+
+- `<SOURCE>_PUBLISH_DELAY_MINUTES` — how long after a model run's init time its files become available upstream. The fetcher won't try to read a run published more recently than this.
+- `<SOURCE>_DBZ_OFFSET` — a dBZ calibration shift applied after Marshall-Palmer Z-R conversion (only for sources that derive reflectivity from precipitation rate, not those with native composite reflectivity). Marshall-Palmer is for stratiform rain at the surface; radar reads 5-10 dBZ higher at the brightest part of the storm column, so a positive offset brings model output closer to OPERA / NEXRAD radar in colour.
+- `<SOURCE>_BASE_URL` (HTTPS sources) or `<SOURCE>_S3_BUCKET` + `<SOURCE>_S3_REGION` (AWS Open Data sources) — should rarely need changing; the defaults point at the upstream-provider buckets.
+
+### North American: HRRR / HRRR-Alaska
+
+NOAA HRRR runs at 3 km native resolution on disjoint CONUS (LCC) and Alaska (polar stereographic) domains, both via the same anonymous AWS Open Data bucket. CONUS uses the `wrfsubhf` 15-min sub-hourly product; Alaska uses hourly `wrfsfcf`. The two domains share one toggle: enabling `hrrr` turns on both.
+
+#### `LIBREWXR_NA_NWP_SOURCE`
+
+| | |
+|---|---|
+| **Default** | `ifs` |
+| **Type** | string |
+| **Values** | `ifs`, `hrrr` |
+
+- **`ifs`** — IFS only; no regional NWP over CONUS or Alaska.
+- **`hrrr`** — Adds HRRR-CONUS (3 km LCC, 15-min subh, hourly cycles) and HRRR-Alaska (3 km polar stereo, hourly wrfsfcf, 3-hourly cycles) to the chain.
+
+#### `LIBREWXR_HRRR_S3_BUCKET`
+
+| | |
+|---|---|
+| **Default** | `noaa-hrrr-bdp-pds` |
+| **Type** | string |
+
+#### `LIBREWXR_HRRR_S3_REGION`
+
+| | |
+|---|---|
+| **Default** | `us-east-1` |
+| **Type** | string |
+
+#### `LIBREWXR_HRRR_PUBLISH_DELAY_MINUTES`
+
+Minutes after HRRR-CONUS run init before the `wrfsubhf` files are typically published.
+
+| | |
+|---|---|
+| **Default** | `55` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_HRRR_ALASKA_PUBLISH_DELAY_MINUTES`
+
+HRRR-Alaska run takes longer than CONUS subh — the full 0–48 h horizon is typically published ~80 min after run init. Bump higher if you see 404s on the freshest cycle.
+
+| | |
+|---|---|
+| **Default** | `80` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+HRRR's native composite reflectivity field is used directly — no `DBZ_OFFSET` needed (no Marshall-Palmer conversion).
+
+### North American: HRDPS
+
+ECCC HRDPS Continental at 2.5 km rotated lat/lon. 4 cycles/day (00/06/12/18 UTC), 48 h horizon, 1-hour APCP accumulation. Anonymous HTTPS via dd.weather.gc.ca. Covers Canada + the northern fringe of CONUS — disjoint enough from HRRR's CONUS focus that they layer cleanly (HRRR first inside CONUS where it's denser, HRDPS second to fill Canada).
+
+#### `LIBREWXR_HRDPS_ENABLED`
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_HRDPS_BASE_URL`
+
+| | |
+|---|---|
+| **Default** | `https://dd.weather.gc.ca` |
+| **Type** | string |
+
+The URL builder appends the date-prefixed archive path so backfill spans midnight UTC cleanly without the `/today/` tree rolling out from under an in-flight fetch.
+
+#### `LIBREWXR_HRDPS_PUBLISH_DELAY_MINUTES`
+
+| | |
+|---|---|
+| **Default** | `240` (~4 hours) |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_HRDPS_DBZ_OFFSET`
+
+| | |
+|---|---|
+| **Default** | `6.0` |
+| **Type** | float |
+| **Unit** | dBZ |
+
+### European: DMI DINI + ICON-EU
+
+LibreWXR's European NWP chain uses both **DMI HARMONIE-AROME DINI** (2 km native LCC) and **DWD ICON-EU** (~7 km regridded lat/lon). DINI covers most of populated Europe (UK, France, Benelux, Germany, Alps, Czechia, Poland, southern Scandinavia, Iceland); ICON-EU fills the European remainder DINI doesn't reach (Iberia, southern Italy, Greece, the Balkans, and eastern Europe past Poland).
+
+#### `LIBREWXR_EU_NWP_PROFILE`
+
+| | |
+|---|---|
+| **Default** | `ifs` |
+| **Type** | string |
+| **Values** | `ifs`, `icon_eu_only`, `dini_with_icon_eu` |
+
+- **`ifs`** — IFS only; no regional NWP over Europe.
+- **`icon_eu_only`** — DWD ICON-EU ahead of IFS. Free DWD opendata HTTPS — no auth. Covers all of Europe broadly.
+- **`dini_with_icon_eu`** — DMI HARMONIE-AROME DINI ahead of ICON-EU ahead of IFS. Anonymous AWS Open Data S3. Best European coverage; adds ~250 MB RAM total.
+
+(Renamed from `LIBREWXR_EU_NWP_SOURCE` on 2026-05-03 — the old `dmi_dini` value implicitly loaded ICON-EU too, which was surprising. The new profile names make the loaded set obvious.)
+
+#### `LIBREWXR_ICON_EU_BASE_URL`
+
+| | |
+|---|---|
+| **Default** | `https://opendata.dwd.de/weather/nwp/icon-eu/grib` |
+| **Type** | string |
+
+#### `LIBREWXR_ICON_EU_PUBLISH_DELAY_MINUTES`
+
+DWD main runs typically publish ~3-4 h after init.
+
+| | |
+|---|---|
+| **Default** | `240` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_ICON_EU_DBZ_OFFSET`
+
+| | |
+|---|---|
+| **Default** | `6.0` |
+| **Type** | float |
+| **Unit** | dBZ |
+
+#### `LIBREWXR_DMI_DINI_S3_BUCKET`
+
+| | |
+|---|---|
+| **Default** | `dmi-opendata` |
+| **Type** | string |
+
+#### `LIBREWXR_DMI_DINI_S3_REGION`
+
+| | |
+|---|---|
+| **Default** | `eu-north-1` |
+| **Type** | string |
+
+#### `LIBREWXR_DMI_DINI_PUBLISH_DELAY_MINUTES`
+
+DMI files publish ~3 h after run init.
+
+| | |
+|---|---|
+| **Default** | `180` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_DMI_DINI_DBZ_OFFSET`
+
+| | |
+|---|---|
+| **Default** | `6.0` |
+| **Type** | float |
+| **Unit** | dBZ |
+
+### Caribbean: AROME Antilles
+
+Météo-France AROME Antilles at 1.3 km native resolution, public-dist as 0.025° regular lat/lon. 4 cycles/day (00/06/12/18 UTC), 48 h horizon. Anonymous via the data.gouv.fr open-data portal. Covers Guadeloupe, Martinique, Saint Martin, Saint-Barthélemy, and the surrounding waters of the eastern Caribbean (~22.9°N → 9.7°N, -75.3°E → -51.7°E). Tiny in-memory cost since the domain is small.
+
+#### `LIBREWXR_AROME_ANTILLES_ENABLED`
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_AROME_ANTILLES_BASE_URL`
+
+| | |
+|---|---|
+| **Default** | `https://object.data.gouv.fr/meteofrance-pnt` |
+| **Type** | string |
+
+#### `LIBREWXR_AROME_ANTILLES_PUBLISH_DELAY_MINUTES`
+
+Full 0..48h files publish ~6-7 h after init; 7 h is conservative.
+
+| | |
+|---|---|
+| **Default** | `420` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_AROME_ANTILLES_DBZ_OFFSET`
+
+| | |
+|---|---|
+| **Default** | `6.0` |
+| **Type** | float |
+| **Unit** | dBZ |
+
+### South American: WRF-SMN
+
+Servicio Meteorológico Nacional Argentina WRF-DET at 4 km LCC. First regional NWP for the South American Cone — covers Argentina, Chile, Uruguay, Paraguay, Bolivia, southern Brazil + adjacent oceans. Anonymous AWS Open Data (smn-ar-wrf in us-west-2). 4 cycles/day, 72 h horizon. Files are NetCDF4 (~34 MB each — the only non-GRIB source in the chain).
+
+#### `LIBREWXR_WRF_SMN_ENABLED`
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+#### `LIBREWXR_WRF_SMN_S3_BUCKET`
+
+| | |
+|---|---|
+| **Default** | `smn-ar-wrf` |
+| **Type** | string |
+
+#### `LIBREWXR_WRF_SMN_S3_REGION`
+
+| | |
+|---|---|
+| **Default** | `us-west-2` |
+| **Type** | string |
+
+Note the bucket lives in **us-west-2**, not us-east-1 as the AWS Open Data Registry page suggests.
+
+#### `LIBREWXR_WRF_SMN_PUBLISH_DELAY_MINUTES`
+
+Full 0..72h files publish ~3-4 h after init; 4 h is conservative.
+
+| | |
+|---|---|
+| **Default** | `240` |
+| **Type** | integer |
+| **Unit** | minutes |
+
+#### `LIBREWXR_WRF_SMN_DBZ_OFFSET`
+
+| | |
+|---|---|
+| **Default** | `6.0` |
+| **Type** | float |
+| **Unit** | dBZ |
+
+### `LIBREWXR_NWP_FETCH_CONCURRENCY`
+
+Maximum number of NWP grid fetches running in parallel inside one fetch cycle. Each grid loads tens-to-hundreds of MB during decode, so this caps peak transient RAM at ~N × per-grid working set.
+
+| | |
+|---|---|
+| **Default** | `4` |
+| **Type** | integer |
+
+4 fits comfortably in 8 GB; bump to 6-8 on bigger rigs (the multi-worker compose file overrides this to 8) to bring cycle wall time closer to the slowest single source.
 
 ---
 
 ## Nowcasting
 
-Precipitation nowcasting is an experimental feature that extrapolates recent radar data forward using optical flow to generate short-range forecast frames. These can optionally be blended with ECMWF IFS forecast data.
+Precipitation nowcasting is an experimental feature that extrapolates recent radar data forward using optical flow to generate short-range forecast frames. The frames can optionally be blended with the active NWP model's forecast.
 
 ### `LIBREWXR_NOWCAST_ENABLED`
-
-Enable or disable nowcast frame generation.
 
 | | |
 |---|---|
@@ -368,165 +806,247 @@ When enabled, nowcast frames appear in the `radar.nowcast` array of the `/public
 
 ### `LIBREWXR_NOWCAST_FRAMES`
 
-Number of nowcast frames to generate. Each frame covers one fetch interval (default 10 minutes).
+Number of nowcast frames to generate. Each frame covers one `LIBREWXR_FETCH_INTERVAL`.
 
 | | |
 |---|---|
 | **Default** | `6` |
 | **Type** | integer |
 
-At the default 10-minute cadence, 6 frames = 60 minutes of forecast. More frames extend the forecast range but accuracy decreases at the far end. Rain Viewer offered ~30 minutes free / 60 minutes paid.
+At the default 10-minute cadence, 6 frames = 60 minutes of forecast. More frames extend the forecast range but accuracy decreases at the far end.
 
 ### `LIBREWXR_NOWCAST_BLEND_MODE`
 
-Controls how radar extrapolation and ECMWF IFS forecast data are combined during the nowcast window. Beyond 60 minutes, pure IFS is always used regardless of this setting.
+Controls how radar extrapolation and the NWP model forecast are combined during the first 60 minutes of the nowcast window. Beyond 60 minutes, the pure NWP model is always used regardless of this setting.
+
+The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS over Canada, DINI/ICON-EU over Europe, AROME Antilles over the Caribbean, WRF-SMN over the S. American Cone, and ECMWF IFS everywhere else.**
 
 | | |
 |---|---|
 | **Default** | `radar` |
 | **Type** | string |
-| **Values** | `radar`, `blended`, `ifs` |
+| **Values** | `radar`, `blended`, `model` |
 
 - **`radar`** — Pure radar extrapolation for the first 60 minutes. Closest to Rain Viewer behavior. Best for short-range forecasts of existing precipitation, but less reliable for cell initiation or dissipation.
-- **`blended`** — Smooth transition from radar-heavy to IFS-heavy (~87% radar at T+10 min, fading to ~30% at T+60 min). Balances radar detail with IFS large-scale consistency. Uses spatial feathering at radar coverage boundaries to prevent hard seams.
-- **`ifs`** — Pure IFS forecast for all nowcast frames. Most spatially consistent but misses fine detail from recent radar observations.
+- **`blended`** — Smooth transition from radar-heavy to model-heavy. The blend curve is `0.20 + 0.80 * (1 - t)^1.4` where `t` is normalized time from 0 to 1 across the 60-min window — about 100% radar at T+0, ~82% radar at T+10 min, ~50% at T+30 min, ~20% radar at T+60 min. Spatial feathering at radar coverage boundaries prevents hard seams.
+- **`model`** — Pure NWP forecast for all nowcast frames. Most spatially consistent but misses fine detail from recent radar observations.
+
+(Value renamed from `ifs` to `model` after the regional NWP chain shipped — the model side is no longer IFS-only.)
 
 ---
 
-## Performance and Memory
+## Satellite (IFS-Derived Clouds)
 
-### `LIBREWXR_TILE_CACHE_MB`
+Composites ECMWF IFS cloud_cover_high / mid / low into IR-like cloud tiles. Populates the Rain Viewer-compatible `satellite.infrared` endpoint.
 
-Maximum tile cache size in megabytes. The cache stores rendered tile images (PNG/WebP bytes) and evicts the oldest entries when this byte limit is reached.
-
-Higher values mean faster tile serving for repeat requests. Lower values save RAM.
+### `LIBREWXR_SATELLITE_ENABLED`
 
 | | |
 |---|---|
-| **Default** | `200` |
-| **Type** | integer |
-| **Unit** | megabytes |
+| **Default** | `true` |
+| **Type** | boolean |
 
-### `LIBREWXR_COORD_CACHE_SIZE`
+### `LIBREWXR_SATELLITE_MAX_FRAMES`
 
-Maximum entries per coordinate LRU cache. Controls how many tile-coordinate mappings are kept in memory. There are 6 internal coordinate caches, and each entry is 0.5-2 MB depending on tile size.
-
-These caches are the largest RAM consumer after frame data. Reducing this saves significant RAM at the cost of occasional recomputation (~5-20ms per cache miss).
+Hourly IFS cloud cover timesteps to keep. Each timestep adds ~20 MB RAM (three 3600x1801 uint8 grids).
 
 | | |
 |---|---|
-| **Default** | `2048` |
+| **Default** | `12` |
 | **Type** | integer |
 
-**Worst-case RAM usage:** `coord_cache_size x 6 x ~1 MB`
+12 timesteps = 12 hours of cloud cover animation.
 
-### `LIBREWXR_MEMORY_LIMIT_MB`
+---
 
-Memory limit in MB for the memory pressure monitor. When RSS usage exceeds 85% of this limit, the tile cache and coordinate caches are automatically trimmed.
+## Weather Alerts (WMO CAP)
 
-| | |
-|---|---|
-| **Default** | `0` (auto-detect) |
-| **Type** | integer |
-| **Unit** | megabytes |
+Fetches global weather alerts from severeweather.wmo.int. MeteoAlarm geocodes are downloaded on first startup and cached locally. Updates are clock-aligned (:00, :05, :10, …).
 
-When set to `0`, the limit is auto-detected from Docker/cgroup limits or falls back to system RAM. Set this explicitly if auto-detection doesn't work in your environment.
+For US locations, point lookups also query the NWS point endpoint at api.weather.gov to surface non-polygon alerts (e.g. Tornado Watches) that lack geometry in the global feed.
 
-### `LIBREWXR_MEMORY_PRESSURE_CHECK_INTERVAL`
-
-Seconds between memory pressure checks.
+### `LIBREWXR_ALERTS_ENABLED`
 
 | | |
 |---|---|
-| **Default** | `30` |
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_ALERTS_FETCH_INTERVAL`
+
+How often (in seconds) to refresh alerts. Matches the upstream update cadence at 300 s; setting to 600 s halves the request volume.
+
+| | |
+|---|---|
+| **Default** | `300` |
 | **Type** | integer |
 | **Unit** | seconds |
 
-Lower values make the monitor more responsive to memory spikes. Higher values reduce overhead.
+### `LIBREWXR_ALERTS_CONCURRENCY`
 
-### `LIBREWXR_WARMER_THREADS`
-
-Thread pool size for background tile cache warming. When a tile is requested, the warmer pre-renders that same tile position for all other timestamps in the background, so animation playback is smooth without waiting for each frame to render on demand.
+Max concurrent HTTP connections when polling the WMO endpoints.
 
 | | |
 |---|---|
-| **Default** | `4` |
+| **Default** | `5` |
 | **Type** | integer |
 
-4 is a good default. 6-8 on machines with many cores. This is a "nice to have" optimization — scale workers before increasing this.
+### `LIBREWXR_ALERTS_CACHE_DIR`
+
+Cache directory for the downloaded MeteoAlarm geocode data. Empty = system temp.
+
+| | |
+|---|---|
+| **Default** | *(empty)* |
+| **Type** | string |
+
+---
+
+## Persistent Cache
+
+### `LIBREWXR_CACHE_DIR`
+
+Cache directory for processed grids (satellite cloud, NWP, alerts geocodes, master state snapshot). When set, data is saved as memory-mapped files that survive restarts, crashes, and container recreation — no need to re-download from upstream on startup.
+
+| | |
+|---|---|
+| **Default** | *(empty — in-memory only)* |
+| **Type** | string |
+
+**Required** in multi-worker mode. Both the pipeline and render containers must share this directory via a named volume.
+
+- Docker (single-container): set automatically via a named volume in `docker-compose.yml`.
+- Docker (multi-worker): set automatically via the shared named volume in `docker-compose.multiworker.yml`.
+- Local dev: set to a local path like `./cache`.
+
+---
+
+## Performance and Reliability
+
+### `LIBREWXR_DOWNLOAD_RETRIES`
+
+Number of retries on transient download errors (connection refused, timeout, DNS failure, truncated response). Each retry waits 1 second before trying again. Applies to all data sources: radar, NWP, satellite, alerts.
+
+| | |
+|---|---|
+| **Default** | `1` |
+| **Type** | integer |
+
+`0` = fail immediately, `1` = one retry (2 total attempts).
+
+---
+
+## Tile Request Tracking
+
+When enabled, per-tile request counts at high zooms are recorded in memory and surfaced in `/health` under `tile_requests`. Observational only — used to identify hotspots for a future adaptive pre-warming pass. Counters reset on restart.
+
+### `LIBREWXR_TILE_TRACKING_ENABLED`
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_TILE_TRACKING_MIN_ZOOM`
+
+Track only zoom levels at or above this value. Lower zooms are pre-warmed already so they don't need observation.
+
+| | |
+|---|---|
+| **Default** | `7` |
+| **Type** | integer |
+
+### `LIBREWXR_TILE_TRACKING_MAX_ENTRIES`
+
+Cap on per-tile counter entries. When full, the table halves (drops the lower half of counters) and continues.
+
+| | |
+|---|---|
+| **Default** | `10000` |
+| **Type** | integer |
 
 ---
 
 ## RAM Sizing Guide
 
-RAM usage depends primarily on which regions are enabled, how many frames are kept in memory, and how many workers are running. Caches (coordinate + tile) fill up under real traffic and account for a large portion of steady-state usage.
+### Single-container mode
+
+Each worker process holds its own copy of radar frames, NWP grids, coordinate caches, and tile caches. RAM grows under real traffic as caches fill up.
 
 | Configuration | Estimated RAM |
 |---|---|
-| CONUS, 1 worker, 12 frames | ~3 GB |
-| CONUS, 1 worker, 20 frames | ~4 GB |
-| ALL regions, 1 worker, 12 frames | ~7 GB |
-| ALL regions, 1 worker, 20 frames | ~8 GB |
-| ALL regions, 2 workers, 12 frames | ~12 GB |
-| ALL regions, 2 workers, 20 frames | ~14 GB |
+| CONUS + IFS only, 1 worker, 12 frames | ~3-4 GB |
+| CONUS + HRRR + IFS, 1 worker, 12 frames | ~4-5 GB |
+| ALL regions + IFS only, 1 worker, 12 frames | ~7-8 GB |
+| ALL regions + full NWP chain, 1 worker, 12 frames | ~9-10 GB |
+| ALL regions + full NWP chain, 2 workers, 12 frames | ~16-18 GB |
 
-Set the Docker memory limit in `docker-compose.yml` accordingly:
+### Multi-worker mode
 
-```yaml
-deploy:
-  resources:
-    limits:
-      memory: 7G  # Adjust for your configuration
-```
+Render workers share radar/NWP/cloud state via memmap, so adding workers doesn't multiply the data RAM — only the per-worker tile cache and Python interpreter overhead (~80 MB).
 
----
+| Configuration | Pipeline RAM | Render RAM (total) | Total |
+|---|---|---|---|
+| ALL regions + full NWP chain, 8 workers | ~8-10 GB | ~3-4 GB | ~12-14 GB |
+| ALL regions + full NWP chain, 16 workers | ~8-10 GB | ~5-6 GB | ~14-16 GB |
+| ALL regions + full NWP chain, 32 workers | ~8-10 GB | ~7-8 GB | ~16-18 GB |
 
-## Scaling
-
-| Users | Workers | RAM (ALL regions) | RAM (CONUS only) |
-|-------|---------|-------------------|------------------|
-| 1-5 (personal) | 1 | ~7 GB | ~3 GB |
-| 5-50 (small community) | 2 | ~12 GB | ~5 GB |
-| 50-200 (medium) | 4 + CDN | ~22 GB | ~9 GB |
-| 200+ (large) | 8+ + CDN | 40+ GB | 16+ GB |
-
-Tiles are served with `Cache-Control: public, max-age=300`, so any caching reverse proxy (nginx, Cloudflare, etc.) absorbs repeat tile requests automatically. A CDN like Cloudflare (free tier works) can dramatically reduce the number of requests hitting your server. Using a Cloudflare Tunnel also provides free HTTPS with no certificate management.
-
-For most self-hosting scenarios, **1 worker behind Cloudflare is sufficient**.
+Production observation on an 80-core / 32 GB rack with 32 workers: ~16 GB total RSS settled across both containers.
 
 ---
 
 ## Example Configurations
 
-### Minimal (personal use, US only)
+### Minimal (personal use, US only, single-container)
 
 ```bash
 LIBREWXR_PUBLIC_URL=http://localhost:8080
 LIBREWXR_ENABLED_REGIONS=CONUS
+LIBREWXR_NA_NWP_SOURCE=hrrr           # adds HRRR-CONUS for high-res forecasts
+LIBREWXR_HRDPS_ENABLED=false          # not needed without Canada
+LIBREWXR_AROME_ANTILLES_ENABLED=false
+LIBREWXR_WRF_SMN_ENABLED=false
+LIBREWXR_EU_NWP_PROFILE=ifs           # IFS only over Europe (we don't show it)
 ```
 
-Docker memory limit: 3 GB
+Docker memory limit: ~5 GB
 
-### Full coverage, single user
+### Full coverage, personal / small server (single-container)
 
 ```bash
 LIBREWXR_PUBLIC_URL=https://radar.example.com
 LIBREWXR_ENABLED_REGIONS=ALL
+LIBREWXR_NA_NWP_SOURCE=hrrr
+LIBREWXR_HRDPS_ENABLED=true
+LIBREWXR_EU_NWP_PROFILE=dini_with_icon_eu
+LIBREWXR_AROME_ANTILLES_ENABLED=true
+LIBREWXR_WRF_SMN_ENABLED=true
 ```
 
-Docker memory limit: 7 GB
+Docker memory limit: ~10 GB
 
-### Community server with CDN
+### Production / multi-worker (full coverage, busy public instance)
 
+In `.env`:
 ```bash
 LIBREWXR_PUBLIC_URL=https://radar.example.com
 LIBREWXR_ENABLED_REGIONS=ALL
-LIBREWXR_WORKERS=2
-LIBREWXR_WEBP_QUALITY=80
-LIBREWXR_TILE_CACHE_MB=400
+LIBREWXR_NA_NWP_SOURCE=hrrr
+LIBREWXR_HRDPS_ENABLED=true
+LIBREWXR_EU_NWP_PROFILE=dini_with_icon_eu
+LIBREWXR_AROME_ANTILLES_ENABLED=true
+LIBREWXR_WRF_SMN_ENABLED=true
+LIBREWXR_WORKERS=32                   # render worker pool size
 ```
 
-Docker memory limit: 14 GB. Put Cloudflare or nginx in front.
+Then run:
+```bash
+docker compose -f docker-compose.multiworker.yml up -d
+```
+
+The compose file sets `LIBREWXR_NWP_FETCH_CONCURRENCY=8` and the per-worker tile cache / coord cache / warmer thread defaults automatically.
+
+Defaults: pipeline cap 12 GB, render cap 18 GB, total ~16 GB RSS in practice.
 
 ### Lightweight / low-RAM
 
@@ -537,6 +1057,12 @@ LIBREWXR_COORD_CACHE_SIZE=512
 LIBREWXR_TILE_CACHE_MB=50
 LIBREWXR_ECMWF_INTERPOLATION=false
 LIBREWXR_NOWCAST_ENABLED=false
+LIBREWXR_NA_NWP_SOURCE=ifs            # skip HRRR — IFS only
+LIBREWXR_HRDPS_ENABLED=false
+LIBREWXR_AROME_ANTILLES_ENABLED=false
+LIBREWXR_WRF_SMN_ENABLED=false
+LIBREWXR_SATELLITE_ENABLED=false
+LIBREWXR_ALERTS_ENABLED=false
 ```
 
-Minimizes RAM at the cost of shorter history (1 hour), slower cache hits, and no interpolation or nowcasting. Docker memory limit: ~1.5 GB.
+Minimizes RAM at the cost of shorter history (1 hour), slower cache hits, no interpolation/nowcast, no regional NWP, no satellite, no alerts. Docker memory limit: ~1.5 GB.

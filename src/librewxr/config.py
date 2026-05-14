@@ -166,8 +166,10 @@ class Settings(BaseSettings):
     alerts_cache_dir: str = ""  # Cache dir for meteoalarm data; empty = system temp
     alerts_concurrency: int = 5  # Max concurrent WMO HTTP connections
 
-    # Tile request tracking — observational only; surfaces hot tiles in /health.
-    # See docs/adaptive-tile-warming-design.md for the planned use of this data.
+    # Tile request tracking — observational only; surfaces hot tiles in /health
+    # for diagnostic use.  Originally instrumentation for a planned adaptive
+    # warming pass, but multi-worker mode made cold-render stalls imperceptible
+    # in practice, so the warming policy itself isn't shipping.
     tile_tracking_enabled: bool = True
     tile_tracking_min_zoom: int = 7  # Track only z >= this (overview zooms are pre-warmed anyway)
     tile_tracking_max_entries: int = 10_000  # Cap per-tile counters; halves when full

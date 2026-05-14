@@ -1,3 +1,13 @@
+# Single-container deployment — runs LibreWXR as one process (fetcher +
+# tile renderer in the same Python interpreter).  Good for personal /
+# small-scale self-hosting where one CPU and a few GB of RAM are
+# plenty.
+#
+# For serious deployments (8+ cores, busy public instance), use
+# docker-compose.multiworker.yml instead — it splits the data pipeline
+# from a pool of render workers that share state via memmap, letting
+# every core actually do work instead of one core hitting the GIL.
+
 services:
   librewxr:
     build: .
@@ -7,15 +17,13 @@ services:
       - .env
     environment:
       LIBREWXR_CACHE_DIR: /data/cache
-      # Uncomment when regional NWP models land (see
-      # docs/regional-nwp-models-research.md) — caps OpenCV's internal
-      # thread pool so multiple concurrent optical-flow passes don't
-      # oversubscribe cores. Leaving it unset lets the current single
-      # IFS interpolation use all cores for fastest hour-boundary work.
-      # OPENCV_NUM_THREADS: "2"
     volumes:
       - librewxr-cache:/data/cache
+      # earthkit-regrid downloads ~50 MB of grid lookup tables on first
+      # use; persisting them avoids the cold-start hit on every restart.
+      - earthkit-cache:/root/.cache/earthkit-regrid
     restart: unless-stopped
+    stop_grace_period: 30s
     logging:
       driver: json-file
       options:
@@ -24,21 +32,24 @@ services:
     deploy:
       resources:
         limits:
-          # Adjust based on regions, frames, and workers.
-          # RAM includes frame data + coordinate caches + tile cache,
-          # which grow significantly under real usage.
-          # ALL regions, MRMS source, 1 worker:
-          #   12 frames: ~8 GB (MRMS grids are wider)
-          #   20 frames: ~9 GB
-          # ALL regions, IEM source, 1 worker:
-          #   12 frames: ~7 GB
-          #   20 frames: ~8 GB
-          # CONUS only, 1 worker (any source):
-          #   12 frames: ~3 GB
-          #   20 frames: ~4 GB
-          # Override in .env: LIBREWXR_MEMORY=4G
+          # Adjust based on regions, frames, and which NWP sources you
+          # enable.  RAM is dominated by radar frames + NWP grids +
+          # coordinate / tile caches, all of which grow as you turn
+          # more on.
+          #
+          # Rough RAM targets (1 worker, all defaults from .env.example):
+          #   CONUS + IFS only:                       ~3-4 GB
+          #   CONUS + HRRR + IFS:                     ~4-5 GB
+          #   ALL regions + IFS only:                 ~7-8 GB
+          #   ALL regions + full NWP chain:           ~9-10 GB
+          #     (HRRR + HRRR-Alaska + HRDPS + DMI DINI + ICON-EU +
+          #      AROME Antilles + WRF-SMN + IFS, with cloud/alerts on)
+          #
+          # Override in .env: LIBREWXR_MEMORY=10G
           memory: ${LIBREWXR_MEMORY:-7G}
 
+  # Wipe the shared cache volume.  Run with:
+  #   docker compose run --rm clear-cache
   clear-cache:
     image: alpine:latest
     volumes:
@@ -48,3 +59,4 @@ services:
 
 volumes:
   librewxr-cache:
+  earthkit-cache:

@@ -11,6 +11,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [Tile URL Format](#tile-url-format)
   - [Satellite Tile URL Format](#satellite-tile-url-format)
   - [Coverage Tile Endpoint](#coverage-tile-endpoint)
+  - [Alerts Endpoint](#alerts-endpoint)
   - [Health Endpoint](#health-endpoint)
 - [Step-by-Step: Leaflet Integration](#step-by-step-leaflet-integration)
   - [1. Basic Map Setup](#1-basic-map-setup)
@@ -21,6 +22,7 @@ A tutorial for adding live weather radar to a website using LibreWXR. No prior e
   - [6. Adding Nowcast (Forecast) Frames](#6-adding-nowcast-forecast-frames)
   - [7. Precipitation Motion Arrows](#7-precipitation-motion-arrows)
   - [8. Adding a Satellite Layer](#8-adding-a-satellite-layer)
+  - [9. Adding a Weather Alerts Overlay](#9-adding-a-weather-alerts-overlay)
 - [Step-by-Step: MapLibre GL JS Integration](#step-by-step-maplibre-gl-js-integration)
   - [1. Basic Map Setup](#1-basic-map-setup-1)
   - [2. Adding a Radar Layer](#2-adding-a-radar-layer)
@@ -51,6 +53,8 @@ The basic flow for displaying radar on a web page is:
 Each radar frame represents a 10-minute snapshot of precipitation. The API typically serves 12 past frames (2 hours of history) plus optional nowcast (forecast) frames up to 60 minutes into the future.
 
 LibreWXR also serves **satellite tiles** — IFS-derived cloud cover that approximates infrared satellite imagery. These work the same way (fetch timestamps, build URLs, add as a layer) but use a different URL pattern and update hourly instead of every 10 minutes.
+
+Beyond tiles, LibreWXR exposes a **weather alerts API** — a global feed of WMO CAP alerts (severe weather warnings, watches, advisories) returned as a GeoJSON FeatureCollection that you can drop into any map library that consumes GeoJSON.
 
 ---
 
@@ -200,13 +204,67 @@ GET /v2/coverage/0/{size}/{z}/{x}/{y}/0/0_0.png
 
 Returns a tile showing where radar data exists (useful for debugging or displaying coverage boundaries). The coverage tile is always PNG format.
 
+### Alerts Endpoint
+
+```
+GET /v2/alerts
+GET /v2/alerts?lat={lat}&lon={lon}
+GET /v2/alerts?bbox=west,south,east,north
+```
+
+Returns active weather alerts as a GeoJSON `FeatureCollection`. Each feature carries the alert polygon plus CAP metadata in its `properties`. The data source is the WMO CAP feed at severeweather.wmo.int (global) plus the NWS point endpoint for US locations (which surfaces alerts like Tornado Watches that lack polygon geometry in the global feed).
+
+**Query parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| *(none)* | All active alerts worldwide |
+| `lat`, `lon` | Alerts whose polygon contains the point (and, for US points, also queries the NWS point endpoint) |
+| `bbox` | `west,south,east,north` — alerts whose polygon intersects the box (polygon-only) |
+| `simplify` | Polygon simplification tolerance in meters (default `1000`, set `0` for full resolution) |
+
+Returns `503 Service Unavailable` if `LIBREWXR_ALERTS_ENABLED=false` on the server.
+
+**Example response:**
+
+```json
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-95.0, 30.0], [-94.0, 30.0], [-94.0, 31.0], [-95.0, 31.0], [-95.0, 30.0]]]
+      },
+      "properties": {
+        "identifier": "NWS-LCH-1234",
+        "sender": "w-nws.webmaster@noaa.gov",
+        "sent": "2026-05-13T14:00:00Z",
+        "expires": "2026-05-13T22:00:00Z",
+        "event": "Severe Thunderstorm Warning",
+        "headline": "Severe Thunderstorm Warning issued May 13 at 2:00PM CDT",
+        "description": "...",
+        "severity": "Severe",
+        "urgency": "Immediate",
+        "certainty": "Likely",
+        "areaDesc": "Jefferson County",
+        "country": "US"
+      }
+    }
+  ]
+}
+```
+
+The `severity` / `urgency` / `certainty` fields follow the CAP 1.2 vocabulary, which is convenient for styling: colour by severity, only animate the `Immediate` ones, etc.
+
 ### Health Endpoint
 
 ```
 GET /health
 ```
 
-Returns server status, frame count, cache usage, and RAM stats. Useful for monitoring, not typically needed for web integration.
+Returns server status, frame count, cache usage, RAM stats, NWP chain state, alerts status, and satellite cache state. Useful for monitoring, not typically needed for web integration.
 
 ---
 
@@ -573,6 +631,90 @@ function toggleSatellite() {
 **Animating satellite independently:** Since satellite updates hourly while radar updates every 10 minutes, you typically animate them on separate timers. The satellite animation loop is the same pattern as radar (section 4) but with a longer delay between frames (1–2 seconds) and using `satelliteFrames` instead of `frames`.
 
 **Layering order:** Add the satellite layer *before* the radar layer so radar overlays on top of clouds. In Leaflet, you can control this with `layer.setZIndex()` or by adding layers in the right order.
+
+### 9. Adding a Weather Alerts Overlay
+
+LibreWXR's `/v2/alerts` endpoint returns active WMO CAP weather alerts as a GeoJSON `FeatureCollection`. Leaflet has built-in GeoJSON support, so dropping alerts onto your map is a few lines:
+
+```javascript
+var alertsLayer = null;
+
+async function loadAlerts() {
+    if (alertsLayer) {
+        map.removeLayer(alertsLayer);
+    }
+
+    var response = await fetch(LIBREWXR_URL + "/v2/alerts");
+    if (!response.ok) return;  // 503 = alerts disabled on the server
+
+    var geojson = await response.json();
+
+    alertsLayer = L.geoJSON(geojson, {
+        style: function (feature) {
+            return {
+                color: severityColor(feature.properties.severity),
+                weight: 2,
+                fillOpacity: 0.15,
+            };
+        },
+        onEachFeature: function (feature, layer) {
+            var p = feature.properties;
+            layer.bindPopup(
+                "<strong>" + (p.event || "Alert") + "</strong><br>" +
+                (p.headline || "") + "<br>" +
+                "<em>" + (p.areaDesc || "") + "</em><br>" +
+                "Severity: " + p.severity + " · Urgency: " + p.urgency
+            );
+        }
+    }).addTo(map);
+}
+
+function severityColor(severity) {
+    switch (severity) {
+        case "Extreme":  return "#ff00ff";
+        case "Severe":   return "#ff0000";
+        case "Moderate": return "#ff8800";
+        case "Minor":    return "#ffcc00";
+        default:         return "#aaaaaa";
+    }
+}
+
+// Initial load
+loadAlerts();
+
+// Refresh every 5 minutes to match the server's update cadence
+setInterval(loadAlerts, 5 * 60 * 1000);
+```
+
+**Filtering by viewport:** If you only care about alerts visible on screen, use the `bbox` query parameter:
+
+```javascript
+var bounds = map.getBounds();
+var bbox = [
+    bounds.getWest(), bounds.getSouth(),
+    bounds.getEast(), bounds.getNorth()
+].join(",");
+
+var response = await fetch(LIBREWXR_URL + "/v2/alerts?bbox=" + bbox);
+```
+
+This is much lighter than loading every active alert worldwide when the user is only looking at one country.
+
+**Per-location lookup:** For "what alerts apply where I clicked?" use `lat`/`lon`:
+
+```javascript
+map.on("click", async function (e) {
+    var response = await fetch(
+        LIBREWXR_URL + "/v2/alerts?lat=" + e.latlng.lat + "&lon=" + e.latlng.lng
+    );
+    var geojson = await response.json();
+    // ... show alerts in a popup
+});
+```
+
+For US locations, point lookups also include alerts from the NWS point endpoint that lack polygon geometry in the global CAP feed (e.g., Tornado Watches). Outside the US the response is polygon-only from the WMO feed.
+
+**Layer order:** Add alerts *after* radar/satellite so the polygons sit on top. Use a low fill opacity (~0.15) so radar remains visible beneath the alert area.
 
 ---
 
