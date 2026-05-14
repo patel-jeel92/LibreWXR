@@ -435,11 +435,11 @@ OPERA_STATIONS: list[tuple[float, float]] = [
     (46.3706, 7.4869),    # chple Plaine Morte
     (46.8131, 9.7944),    # chwea Weissfluh
     (47.2842, 8.512),     # chalb Albis
-    # Turkey (TR) - 4 radars
-    (41.19, 32.95),       # trbal Ankara/Bala
-    (40.96, 27.97),       # trist Istanbul
-    (38.48, 27.15),       # trzm Izmir
-    (36.95, 35.40),       # trade Adana
+    # Turkey is NOT an OPERA member: the Turkish State Meteorological
+    # Service (MGM) operates ~25 radars but they don't feed into OPERA
+    # CIRRUS, so including them here would falsely suppress IFS
+    # fallback across Turkey.  See the EUMETNET OPERA Database:
+    # https://www.eumetnet.eu/wp-content/themes/aeron-child/observations-programme/current-activities/opera/database/OPERA_Database/index.html
     # United Kingdom (UK) - 16 radars
     (54.50, -6.34),       # ukcas Castor Bay
     (51.6892, -0.5306),   # ukche Chenies
