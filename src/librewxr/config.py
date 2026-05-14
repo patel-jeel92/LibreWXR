@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
     ecmwf_snow_ratio_threshold: float = 0.5
+    # Temperature threshold (°C) for snow classification in regional NWP
+    # sources that don't carry a native snow-ratio field.  Each source
+    # computes snow = (T_2m < threshold).  1.5 °C matches Open-Meteo's
+    # softer threshold and captures wet-snow at ground level without
+    # painting cold rain as snow.  Used by HRRR, HRRR-Alaska, HRDPS,
+    # DMI DINI, ICON-EU, and WRF-SMN.  IFS uses its native snowfall
+    # ratio (``ecmwf_snow_ratio_threshold`` above) instead.
+    regional_snow_temp_threshold: float = 1.5
     ecmwf_max_timesteps: int = 0  # 0 = auto (derived from max_frames)
     ecmwf_interpolation: bool = True  # Optical flow interpolation of IFS hourly data to 10-min frames
     # Disable IFS entirely (skip the global precipitation fallback).  Useful

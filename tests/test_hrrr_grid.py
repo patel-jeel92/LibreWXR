@@ -22,10 +22,12 @@ from librewxr.data.hrrr_grid import (
     HRRRGrid,
     SUBH_INTERVAL_SECONDS,
     bracket_subh_leads,
+    compute_snow_mask,
     domain_mask,
     encode_dbz,
     feather_mask,
     find_refc_records,
+    find_tmp_2m_records,
     floor_hour,
     grid_indices,
     latest_published_run,
@@ -571,15 +573,17 @@ class TestHRRRGridProtocol:
         encoded_new = int((50 + 32) * 2)
         assert abs(int(out2[0]) - encoded_new) <= 1
 
-    def test_get_snow_mask_returns_all_false(self):
-        # Phase 2 v1: HRRR delegates snow classification to the next chain
-        # source by returning False everywhere.
+    def test_get_snow_mask_without_loaded_masks_returns_false(self):
+        # When REFC frames are loaded but no snow masks are present (e.g.
+        # TMP:2m fetch failed), get_snow_mask returns all-False so the
+        # chain dispatcher falls through to the next snow-capable source.
         g = HRRRGrid()
         run = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
         _inject_frame(g, run, 900, 30.0)
+        _inject_frame(g, run, 1800, 30.0)
         lat = np.array([40.0, 50.0, 60.0])
         lon = np.array([-100.0, -90.0, -80.0])
-        out = g.get_snow_mask(lat, lon, timestamp=run + 900)
+        out = g.get_snow_mask(lat, lon, timestamp=run + 1500)
         assert out.dtype == np.bool_
         assert out.shape == lat.shape
         assert not out.any()
@@ -723,3 +727,318 @@ class TestPersistence:
         # No leftover .tmp
         assert not list(cache_dir.glob("*.tmp"))
         await g.close()
+
+
+# ── Snow mask ─────────────────────────────────────────────────────────
+
+
+def _inject_snow_mask(
+    grid: HRRRGrid, run_ts: int, lead_seconds: int, snow_value: int
+) -> None:
+    """Helper: inject a uniform-value snow mask into HRRRGrid for testing."""
+    arr = np.full(
+        (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH),
+        snow_value & 0x01,
+        dtype=np.uint8,
+    )
+    grid._snow_masks[(run_ts, lead_seconds)] = arr
+
+
+class TestSnowMaskHelpers:
+    """The module-level T_2m / snow-mask helper functions."""
+
+    SAMPLE_IDX = (
+        "1:0:d=2026050112:REFC:entire atmosphere:15 min fcst:\n"
+        "2:466568:d=2026050112:TMP:2 m above ground:15 min fcst:\n"
+        "3:729628:d=2026050112:TMP:surface:15 min fcst:\n"
+        "4:800000:d=2026050112:DPT:2 m above ground:15 min fcst:\n"
+        "5:900000:d=2026050112:TMP:2 m above ground:30 min fcst:\n"
+        "6:1000000:d=2026050112:TMP:2 m above ground:45 min fcst:\n"
+    )
+
+    def test_find_tmp_2m_records_filters_level(self):
+        records = parse_idx(self.SAMPLE_IDX)
+        tmps = find_tmp_2m_records(records)
+        # Three TMP records at "2 m above ground"; surface TMP and DPT excluded.
+        assert len(tmps) == 3
+        first_rec, first_end = tmps[0]
+        assert first_rec.var == "TMP"
+        assert first_rec.level == "2 m above ground"
+        assert first_rec.step == "15 min fcst"
+        # First TMP record byte range is bounded by the next record (surface
+        # TMP at offset 729628), not the next 2-m TMP record.
+        assert first_end == 729627
+        # Last 2-m TMP has no further record → end = -1
+        last_rec, last_end = tmps[-1]
+        assert last_rec.step == "45 min fcst"
+        assert last_end == -1
+
+    def test_find_tmp_2m_records_empty_on_no_tmp(self):
+        records = parse_idx(
+            "1:0:d=2026050112:REFC:entire atmosphere:15 min fcst:\n"
+            "2:100:d=2026050112:RETOP:cloud top:15 min fcst:\n"
+        )
+        assert find_tmp_2m_records(records) == []
+
+    def test_compute_snow_mask_below_threshold(self):
+        # < 1.5 °C → snow (1)
+        t2m = np.array([[-10.0, 0.0, 1.0]], dtype=np.float32)
+        out = compute_snow_mask(t2m, threshold=1.5)
+        assert out.dtype == np.uint8
+        assert out.tolist() == [[1, 1, 1]]
+
+    def test_compute_snow_mask_above_threshold(self):
+        # >= 1.5 °C → rain (0)
+        t2m = np.array([[1.5, 5.0, 20.0]], dtype=np.float32)
+        out = compute_snow_mask(t2m, threshold=1.5)
+        assert out.tolist() == [[0, 0, 0]]
+
+    def test_compute_snow_mask_handles_nan(self):
+        # NaN cells are treated as no-snow (don't paint snow palette over
+        # decode glitches).
+        t2m = np.array([np.nan, -10.0, np.nan, 25.0], dtype=np.float32)
+        out = compute_snow_mask(t2m, threshold=1.5)
+        assert out.tolist() == [0, 1, 0, 0]
+
+    def test_compute_snow_mask_custom_threshold(self):
+        # Threshold is configurable per call — tests the future-tuning path.
+        t2m = np.array([-5.0, -1.0, 0.0, 1.0, 5.0], dtype=np.float32)
+        # Stricter: only sub-zero counts as snow
+        out = compute_snow_mask(t2m, threshold=0.0)
+        assert out.tolist() == [1, 1, 0, 0, 0]
+
+
+class TestSnowMask:
+    """HRRRGrid.get_snow_mask end-to-end behaviour."""
+
+    def test_supports_snow_is_true(self):
+        # The chain dispatcher gates on this — must be True so HRRR-CONUS
+        # actually wins inside its domain.
+        g = HRRRGrid()
+        assert g.supports_snow is True
+
+    def test_no_data_returns_all_false(self):
+        g = HRRRGrid()
+        lat = np.array([40.0, 50.0])
+        lon = np.array([-100.0, -90.0])
+        out = g.get_snow_mask(lat, lon, timestamp=12345)
+        assert out.dtype == np.bool_
+        assert out.shape == lat.shape
+        assert not out.any()
+
+    def test_no_timestamp_returns_all_false(self):
+        g = HRRRGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 900, 30.0)
+        _inject_snow_mask(g, run, 900, 1)
+        out = g.get_snow_mask(np.array([40.0]), np.array([-100.0]), timestamp=None)
+        assert not out.any()
+
+    def test_uniform_snow_returns_true_in_domain(self):
+        g = HRRRGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 900, 30.0)
+        _inject_frame(g, run, 1800, 30.0)
+        _inject_snow_mask(g, run, 900, 1)
+        _inject_snow_mask(g, run, 1800, 1)
+
+        # CONUS point inside the HRRR grid → snow=True
+        out = g.get_snow_mask(
+            np.array([40.0]), np.array([-100.0]), timestamp=run + 1500,
+        )
+        assert out.tolist() == [True]
+
+    def test_uniform_rain_returns_false_in_domain(self):
+        g = HRRRGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 900, 30.0)
+        _inject_frame(g, run, 1800, 30.0)
+        _inject_snow_mask(g, run, 900, 0)
+        _inject_snow_mask(g, run, 1800, 0)
+
+        out = g.get_snow_mask(
+            np.array([40.0]), np.array([-100.0]), timestamp=run + 1500,
+        )
+        assert out.tolist() == [False]
+
+    def test_outside_domain_returns_false(self):
+        g = HRRRGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 900, 30.0)
+        _inject_frame(g, run, 1800, 30.0)
+        _inject_snow_mask(g, run, 900, 1)
+        _inject_snow_mask(g, run, 1800, 1)
+
+        # London — outside HRRR's CONUS domain
+        out = g.get_snow_mask(
+            np.array([51.5]), np.array([-0.1]), timestamp=run + 1500,
+        )
+        # _sample_grid returns 0 outside the grid; that re-binarises to False.
+        assert out.tolist() == [False]
+
+    def test_lerp_bracket_majority_at_midpoint(self):
+        # When the bracket frames disagree, alpha < 0.5 picks L0 and
+        # alpha >= 0.5 picks L1.  This mirrors the docstring of
+        # get_snow_mask's lerp branch.
+        g = HRRRGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 900, 30.0)
+        _inject_frame(g, run, 1800, 30.0)
+        _inject_snow_mask(g, run, 900, 0)   # L0: rain
+        _inject_snow_mask(g, run, 1800, 1)  # L1: snow
+
+        # alpha=0.33 → rain wins (closer to L0)
+        out_low = g.get_snow_mask(
+            np.array([40.0]), np.array([-100.0]), timestamp=run + 1200,
+        )
+        assert out_low.tolist() == [False]
+
+        # alpha=0.67 → snow wins (closer to L1)
+        out_high = g.get_snow_mask(
+            np.array([40.0]), np.array([-100.0]), timestamp=run + 1500,
+        )
+        assert out_high.tolist() == [True]
+
+    def test_partial_bracket_returns_false(self):
+        # Only L0 snow mask present; L1 snow mask missing.  Falls through
+        # gracefully so the chain dispatcher reaches the next source.
+        g = HRRRGrid()
+        run = int(datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        _inject_frame(g, run, 900, 30.0)
+        _inject_frame(g, run, 1800, 30.0)
+        _inject_snow_mask(g, run, 900, 1)
+        # Deliberately no snow_mask at lead 1800.
+
+        out = g.get_snow_mask(
+            np.array([40.0]), np.array([-100.0]), timestamp=run + 1500,
+        )
+        assert not out.any()
+
+
+class TestSnowMaskPersistence:
+    """Snow masks are atomic-write parallel files alongside REFC frames."""
+
+    @pytest.mark.asyncio
+    async def test_snow_mask_round_trips_through_disk(self, tmp_path):
+        run_ts = int(datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc).timestamp())
+
+        g1 = HRRRGrid(cache_dir=tmp_path)
+        # Ingest REFC + snow for two bracketing leads.
+        arr = np.full(
+            (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), 30.0, dtype=np.float32,
+        )
+        for lead in (900, 1800):
+            encoded = encode_dbz(arr)
+            mm = g1._to_memmap(f"r{run_ts}_l{lead}", encoded)
+            g1._frames[(run_ts, lead)] = mm
+            snow = np.ones((HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), dtype=np.uint8)
+            mm_s = g1._to_memmap(f"r{run_ts}_l{lead}_snow", snow)
+            g1._snow_masks[(run_ts, lead)] = mm_s
+        g1._latest_run_ts = run_ts
+        await g1.close()
+
+        # Both REFC and snow files persisted to disk
+        cache_dir = tmp_path / "hrrr"
+        assert (cache_dir / f"r{run_ts}_l900.dat").exists()
+        assert (cache_dir / f"r{run_ts}_l900_snow.dat").exists()
+
+        # Second "process" picks both up
+        g2 = HRRRGrid(cache_dir=tmp_path)
+        assert g2.frame_count == 2
+        assert g2.snow_mask_count == 2
+        assert (run_ts, 900) in g2._snow_masks
+        assert (run_ts, 1800) in g2._snow_masks
+
+        # Sample at a CONUS point — snow=True everywhere
+        sample_ts = run_ts + 1500
+        out = g2.get_snow_mask(
+            np.array([40.0]), np.array([-100.0]), timestamp=sample_ts,
+        )
+        assert out.tolist() == [True]
+        await g2.close()
+
+    @pytest.mark.asyncio
+    async def test_orphan_snow_mask_is_removed(self, tmp_path):
+        # A snow file without a matching REFC file is dropped on load.
+        cache_dir = tmp_path / "hrrr"
+        cache_dir.mkdir(parents=True)
+        # Orphan snow file (no matching r1234_l900.dat)
+        orphan = cache_dir / "r1234_l900_snow.dat"
+        size = HRRR_GRID_HEIGHT * HRRR_GRID_WIDTH
+        orphan.write_bytes(b"\x00" * size)
+        assert orphan.exists()
+
+        g = HRRRGrid(cache_dir=tmp_path)
+        assert not orphan.exists(), "orphan snow file should be removed"
+        assert g.snow_mask_count == 0
+        await g.close()
+
+    @pytest.mark.asyncio
+    async def test_eviction_removes_snow_files_too(self, tmp_path):
+        run_ts = int(datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc).timestamp())
+        g = HRRRGrid(cache_dir=tmp_path)
+        # Ingest one REFC + snow at the same key.
+        arr = np.full(
+            (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), 30.0, dtype=np.float32,
+        )
+        encoded = encode_dbz(arr)
+        g._to_memmap(f"r{run_ts}_l900", encoded)
+        snow = np.ones((HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH), dtype=np.uint8)
+        g._to_memmap(f"r{run_ts}_l900_snow", snow)
+        # Re-mount so the in-memory dicts know about them.
+        mm = np.memmap(
+            tmp_path / "hrrr" / f"r{run_ts}_l900.dat",
+            dtype=np.uint8, mode="r",
+            shape=(HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH),
+        )
+        g._frames[(run_ts, 900)] = mm
+        mm_s = np.memmap(
+            tmp_path / "hrrr" / f"r{run_ts}_l900_snow.dat",
+            dtype=np.uint8, mode="r",
+            shape=(HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH),
+        )
+        g._snow_masks[(run_ts, 900)] = mm_s
+
+        # Evict to a window far in the future
+        far_future = run_ts + 24 * 3600
+        g._evict_outside_window(far_future, far_future + 600)
+        assert (run_ts, 900) not in g._frames
+        assert (run_ts, 900) not in g._snow_masks
+        assert not (tmp_path / "hrrr" / f"r{run_ts}_l900.dat").exists()
+        assert not (tmp_path / "hrrr" / f"r{run_ts}_l900_snow.dat").exists()
+        await g.close()
+
+
+class TestChainSnowMaskWithHRRR:
+    def test_chain_prefers_hrrr_snow_inside_conus(self):
+        from librewxr.data.ecmwf_grid import ECMWFGrid
+        from librewxr.data.ecmwf_grid import GRID_HEIGHT as IFS_H, GRID_WIDTH as IFS_W
+
+        # IFS says snow everywhere; HRRR says rain everywhere.  Inside HRRR's
+        # domain, HRRR wins → rain.  Outside, IFS wins → snow.
+        ifs = ECMWFGrid()
+        ifs_dbz = np.full((IFS_H, IFS_W), int((10 + 32) * 2), dtype=np.uint8)
+        ifs_snow = np.ones((IFS_H, IFS_W), dtype=bool)
+        ifs._timesteps[1000000] = (ifs_dbz, ifs_snow)
+        ifs._sorted_timestamps = [1000000]
+
+        hrrr = HRRRGrid()
+        run = 1000000 - 1500
+        _inject_frame(hrrr, run, 900, 30.0)
+        _inject_frame(hrrr, run, 1800, 30.0)
+        _inject_snow_mask(hrrr, run, 900, 0)   # rain
+        _inject_snow_mask(hrrr, run, 1800, 0)
+
+        chain = NWPChain([hrrr, ifs])
+
+        # CONUS point: HRRR says rain → False
+        out = chain.get_snow_mask(
+            np.array([40.0]), np.array([-100.0]), timestamp=1000000,
+        )
+        assert out.tolist() == [False]
+
+        # Outside HRRR domain (London): IFS wins → True
+        out = chain.get_snow_mask(
+            np.array([51.5]), np.array([-0.1]), timestamp=1000000,
+        )
+        assert out.tolist() == [True]

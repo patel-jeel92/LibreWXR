@@ -236,6 +236,26 @@ def find_refc_records(records: list[IdxRecord]) -> list[tuple[IdxRecord, int]]:
     return out
 
 
+def find_tmp_2m_records(records: list[IdxRecord]) -> list[tuple[IdxRecord, int]]:
+    """Return [(tmp_2m_record, end_byte)] entries for every 2-metre TMP message.
+
+    Parallel to ``find_refc_records`` but for the 2-metre temperature
+    field used by the snow-mask classifier.  ``TMP`` appears at many
+    levels in HRRR's surface bundle (e.g. ``surface``, ``2 m above
+    ground``, isobaric layers); we want only the 2-m one.
+    """
+    out: list[tuple[IdxRecord, int]] = []
+    for i, rec in enumerate(records):
+        if rec.var != "TMP" or rec.level != "2 m above ground":
+            continue
+        if i + 1 < len(records):
+            end = records[i + 1].byte_offset - 1
+        else:
+            end = -1
+        out.append((rec, end))
+    return out
+
+
 def subh_url(run: datetime, lead_hour: int, *, bucket: str | None = None) -> str:
     """Construct the S3 URL for a HRRR subh file.
 
@@ -380,6 +400,89 @@ def encode_dbz(refc: np.ndarray) -> np.ndarray:
     return np.clip((safe + 32.0) * 2.0 + 0.5, 0, 255).astype(np.uint8)
 
 
+def decode_tmp_2m_message(grib_bytes: bytes) -> np.ndarray | None:
+    """Decode a single GRIB2 message containing 2-m TMP into Celsius float32.
+
+    Returns ``None`` if cfgrib cannot parse the bytes.  The shape is
+    ``(HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH)`` and the row orientation is
+    normalised to row 0 = north, matching ``decode_refc_message``.
+    """
+    import xarray as xr
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".grib2", delete=False) as tmp:
+            tmp.write(grib_bytes)
+            tmp_path = tmp.name
+        with _suppress_eccodes_stderr():
+            ds = xr.open_dataset(
+                tmp_path,
+                engine="cfgrib",
+                backend_kwargs={"indexpath": ""},
+            )
+        ds = ds.compute()
+    except Exception:
+        logger.exception("Failed to decode HRRR TMP:2m GRIB2 message")
+        return None
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # cfgrib names 2-m temperature ``t2m``.  Fall back to first
+    # matching 2D var if a future codetable change moves it.
+    if "t2m" in ds.data_vars:
+        arr = ds["t2m"].values
+    else:
+        for name, da in ds.data_vars.items():
+            if da.ndim == 2 and da.shape == (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH):
+                logger.warning(
+                    "HRRR TMP:2m variable not named 't2m' (got %r); using fallback",
+                    name,
+                )
+                arr = da.values
+                break
+        else:
+            logger.warning(
+                "HRRR GRIB2 message did not contain a recognisable 2-m TMP field"
+            )
+            return None
+
+    if arr.shape != (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH):
+        logger.warning(
+            "HRRR TMP:2m has unexpected shape %s (expected %s); skipping",
+            arr.shape,
+            (HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH),
+        )
+        return None
+
+    # Match the row-orientation handling in ``decode_refc_message``.
+    if "latitude" in ds.coords:
+        lat_top = float(ds["latitude"].values[0, 0])
+        lat_bot = float(ds["latitude"].values[-1, 0])
+        needs_flip = lat_top < lat_bot
+    else:
+        needs_flip = True
+    if needs_flip:
+        arr = np.flipud(arr)
+
+    # cfgrib returns TMP in Kelvin; convert to Celsius for the threshold check.
+    celsius = np.ascontiguousarray(arr, dtype=np.float32) - 273.15
+    return celsius
+
+
+def compute_snow_mask(t2m_celsius: np.ndarray, threshold: float) -> np.ndarray:
+    """Classify each HRRR cell as snow (1) or rain (0) by 2-m temperature.
+
+    Non-finite cells become 0 (treated as no-snow so they don't paint
+    the snow palette over decode glitches).
+    """
+    safe = np.where(np.isfinite(t2m_celsius), t2m_celsius, threshold + 100.0)
+    return (safe < threshold).astype(np.uint8)
+
+
 # ── Subh frame timing helpers ─────────────────────────────────────────
 
 # Subh files publish four 15-minute steps per forecast hour and label
@@ -455,8 +558,14 @@ class HRRRGrid:
     name = "hrrr"
 
     def __init__(self, cache_dir: Path | None = None):
-        # (run_ts, lead_seconds) -> memmap-backed uint8 array on the LCC grid
+        # (run_ts, lead_seconds) -> memmap-backed uint8 array on the LCC grid.
+        # ``_frames`` holds REFC; ``_snow_masks`` holds the parallel 2-m TMP
+        # snow classification (1 = snow, 0 = rain) keyed by the same tuple.
+        # Snow masks are populated opportunistically — if TMP:2m is missing
+        # for a given step ``get_snow_mask`` falls through to all-False there
+        # and the chain dispatcher reaches the next source.
         self._frames: dict[tuple[int, int], np.ndarray] = {}
+        self._snow_masks: dict[tuple[int, int], np.ndarray] = {}
         self._client: httpx.AsyncClient | None = None
         self._latest_run_ts: int | None = None
         self._fetch_lock = asyncio.Lock()
@@ -502,8 +611,11 @@ class HRRRGrid:
     def _memmap_path_for(self, run_ts: int, lead_seconds: int) -> Path:
         return self._memmap_dir / f"r{run_ts}_l{lead_seconds}.dat"
 
+    def _snow_memmap_path_for(self, run_ts: int, lead_seconds: int) -> Path:
+        return self._memmap_dir / f"r{run_ts}_l{lead_seconds}_snow.dat"
+
     def _load_cached_frames(self) -> None:
-        """Memmap-load every previously-cached ``r{run}_l{lead}.dat`` file.
+        """Memmap-load every previously-cached frame and snow mask from disk.
 
         Called at startup when ``cache_dir`` is configured.  Frames that
         the next fetch cycle ends up not needing will be evicted on the
@@ -511,6 +623,11 @@ class HRRRGrid:
         the active window is served immediately, no cold-start fetch.
         Stale ``.tmp`` artifacts left behind by a crash mid-write are
         removed on the way through.
+
+        Snow masks are loaded in a separate pass so a missing snow file
+        for a given ``(run, lead)`` doesn't drop the REFC frame — the
+        chain just falls through to the next snow-capable source for
+        that bracket.
         """
         # Stale .tmp files from a crashed atomic-write — drop them.
         for path in self._memmap_dir.glob("*.tmp"):
@@ -521,6 +638,8 @@ class HRRRGrid:
             try:
                 stem_parts = path.stem.split("_")
                 if len(stem_parts) != 2:
+                    # Skip snow files ("rNNN_lNNN_snow") and any other
+                    # parallel-field files we may add later.
                     continue
                 run_ts = int(stem_parts[0][1:])    # strip "r"
                 lead_s = int(stem_parts[1][1:])    # strip "l"
@@ -546,6 +665,41 @@ class HRRRGrid:
                 "HRRR: loaded %d cached subh frame(s) from disk", loaded,
             )
 
+        # Second pass: parallel snow masks.  Only kept for (run, lead)
+        # keys whose REFC frame is also present — orphan snow masks are
+        # removed since they'd never be queried.
+        snow_loaded = 0
+        for path in self._memmap_dir.glob("r*_l*_snow.dat"):
+            try:
+                stem_parts = path.stem.split("_")
+                if len(stem_parts) != 3 or stem_parts[2] != "snow":
+                    continue
+                run_ts = int(stem_parts[0][1:])
+                lead_s = int(stem_parts[1][1:])
+            except (ValueError, IndexError):
+                continue
+            if (run_ts, lead_s) not in self._frames:
+                # No matching REFC — orphan, drop it.
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                mm = np.memmap(
+                    path,
+                    dtype=np.uint8,
+                    mode="r",
+                    shape=(HRRR_GRID_HEIGHT, HRRR_GRID_WIDTH),
+                )
+            except Exception:
+                logger.warning("Failed to memmap cached snow %s, removing", path)
+                path.unlink(missing_ok=True)
+                continue
+            self._snow_masks[(run_ts, lead_s)] = mm
+            snow_loaded += 1
+        if snow_loaded:
+            logger.info(
+                "HRRR: loaded %d cached snow mask(s) from disk", snow_loaded,
+            )
+
     def __getstate__(self) -> dict:
         """Serialize state for cross-process reload (multi-worker mode).
 
@@ -568,12 +722,16 @@ class HRRRGrid:
         self._client = None
         self._fetch_lock = asyncio.Lock()
         self._frames = {}
+        self._snow_masks = {}
         self._latest_run_ts = None
         self._load_cached_frames()
 
     @property
     def data_bytes(self) -> int:
-        return sum(arr.nbytes for arr in self._frames.values())
+        return (
+            sum(arr.nbytes for arr in self._frames.values())
+            + sum(arr.nbytes for arr in self._snow_masks.values())
+        )
 
     @property
     def latest_run_iso(self) -> str | None:
@@ -584,6 +742,10 @@ class HRRRGrid:
     @property
     def frame_count(self) -> int:
         return len(self._frames)
+
+    @property
+    def snow_mask_count(self) -> int:
+        return len(self._snow_masks)
 
     # ── NWPSource Protocol ───────────────────────────────────────────
 
@@ -606,7 +768,7 @@ class HRRRGrid:
 
     @property
     def supports_snow(self) -> bool:
-        return False
+        return True
 
     def get_snow_mask(
         self,
@@ -614,7 +776,42 @@ class HRRRGrid:
         lon: np.ndarray,
         timestamp: int | None = None,
     ) -> np.ndarray:
-        return np.zeros(lat.shape, dtype=bool)
+        """Sample the snow / rain classification at each (lat, lon, ts).
+
+        Mirrors ``sample`` for the parallel 2-m TMP snow mask: same
+        run picker, same subh bracket-lerp, then re-binarize at 0.5.
+        Returns False everywhere if no snow mask is loaded for the
+        bracket — the chain dispatcher falls through to the next
+        snow-capable source for those pixels.
+        """
+        if timestamp is None or not self._snow_masks:
+            return np.zeros(lat.shape, dtype=bool)
+
+        run = self._pick_run(timestamp)
+        if run is None:
+            return np.zeros(lat.shape, dtype=bool)
+
+        lead = timestamp - run
+        l0, l1, alpha = bracket_subh_leads(lead)
+        s0 = self._snow_masks.get((run, l0))
+        s1 = self._snow_masks.get((run, l1))
+        if s0 is None or s1 is None:
+            return np.zeros(lat.shape, dtype=bool)
+
+        if alpha == 0.0:
+            grid = s0
+        elif alpha == 1.0:
+            grid = s1
+        else:
+            # Lerp the two 0/1 frames and threshold at 0.5 — equivalent
+            # to nearest-neighbour selection of the closer subh frame
+            # at the half-step, picking the L1 frame from alpha == 0.5
+            # onwards.
+            lerped = (1.0 - alpha) * s0.astype(np.float32) + alpha * s1.astype(np.float32)
+            grid = (lerped >= 0.5).astype(np.uint8)
+
+        sampled = _sample_grid(grid, lat, lon, bilinear=False)
+        return sampled.astype(bool)
 
     def sample(
         self,
@@ -788,6 +985,11 @@ class HRRRGrid:
     ) -> int:
         """Fetch every REFC frame from a single subh file. Returns frames added.
 
+        Also fetches the parallel 2-m TMP message for each step and stores
+        the derived snow mask alongside the REFC frame.  TMP failures are
+        non-fatal — the REFC frame still lands and ``get_snow_mask`` falls
+        through to the next chain source for that bracket.
+
         Returns -1 to signal a fetch error (idx unreachable, etc.).
         """
         run_ts = int(run.timestamp())
@@ -827,6 +1029,40 @@ class HRRRGrid:
             self._frames[key] = mm
             added += 1
 
+        # Parallel pass for 2-m TMP → snow mask.  Same idx, separate
+        # byte-range per step.  Skip keys whose snow mask is already
+        # loaded (warm restart) or whose REFC didn't land (no point
+        # carrying an orphan snow mask).
+        threshold = settings.regional_snow_temp_threshold
+        for rec, end in find_tmp_2m_records(records):
+            lead_seconds = lead_seconds_for_step(rec.step)
+            if lead_seconds is None:
+                continue
+            key = (run_ts, lead_seconds)
+            if key in self._snow_masks:
+                continue
+            if key not in self._frames:
+                continue
+
+            try:
+                grib_bytes = await fetch_byte_range(
+                    url, rec.byte_offset, end, client
+                )
+            except httpx.HTTPError as e:
+                logger.warning(
+                    "HRRR TMP:2m byte-range fetch failed for %s lead=%ds: %s",
+                    url, lead_seconds, e,
+                )
+                continue
+
+            t2m = decode_tmp_2m_message(grib_bytes)
+            if t2m is None:
+                continue
+
+            snow = compute_snow_mask(t2m, threshold)
+            mm = self._to_memmap(f"r{run_ts}_l{lead_seconds}_snow", snow)
+            self._snow_masks[key] = mm
+
         return added
 
     # ── Eviction ─────────────────────────────────────────────────────
@@ -837,7 +1073,8 @@ class HRRRGrid:
         Slack is one full bracket interval (15 min) on each side so the
         bracketing L1 frame at the future edge — and the L0 frame at the
         past edge — survive long enough for ``sample`` at the window
-        boundary to find both halves of its bracket.
+        boundary to find both halves of its bracket.  Parallel snow
+        masks for the same keys are evicted in lockstep.
         """
         slack = SUBH_INTERVAL_SECONDS
         ws = window_start - slack
@@ -850,8 +1087,13 @@ class HRRRGrid:
                 stale.append(key)
         for key in stale:
             self._frames.pop(key, None)
+            self._snow_masks.pop(key, None)
             try:
                 self._memmap_path_for(*key).unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                self._snow_memmap_path_for(*key).unlink(missing_ok=True)
             except OSError:
                 pass
         if stale:
@@ -861,6 +1103,7 @@ class HRRRGrid:
 
     async def close(self) -> None:
         self._frames.clear()
+        self._snow_masks.clear()
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
         self._client = None
