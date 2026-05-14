@@ -454,6 +454,10 @@ Polygon shapes follow each grid's actual projected domain (LCC, polar
 stereographic, LAEA, rotated lat/lon, or regular lat/lon) — not a
 misleading lat/lon bounding box — so the curved edges visible on HRRR,
 HRDPS, DMI DINI, OPERA, and WRF-SMN are the real coverage boundaries.
+Regenerate both PNGs with
+[`scripts/generate_coverage_map.py`](scripts/generate_coverage_map.py)
+after adding or changing a radar source or NWP grid (the script header
+documents the throwaway venv recipe).
 
 ### Deployment modes
 

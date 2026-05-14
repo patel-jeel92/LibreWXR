@@ -95,6 +95,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 3. Add group dispatch in `fetcher.py` `__init__`
 4. Add config setting if a new base URL is needed
 5. Everything downstream (store, renderer, API, cache) is source-agnostic
+6. Add the new domain to `scripts/generate_coverage_map.py` and regenerate `docs/coverage-map-radar.png` / `docs/coverage-map-models.png` (script header documents the throwaway-venv recipe)
 
 ## Development Conventions
 
