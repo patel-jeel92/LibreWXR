@@ -84,7 +84,7 @@ documents the throwaway-venv recipe; in short:
 
 ```bash
 python3 -m venv /tmp/coverage-map-venv
-/tmp/coverage-map-venv/bin/pip install matplotlib pyproj
+/tmp/coverage-map-venv/bin/pip install matplotlib pyproj shapely
 curl -L https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson \
      -o /tmp/ne_countries.geojson
 /tmp/coverage-map-venv/bin/python scripts/generate_coverage_map.py
