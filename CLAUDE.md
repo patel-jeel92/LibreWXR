@@ -36,7 +36,7 @@ src/librewxr/
     models.py        # Pydantic response models
   data/
     regions.py       # RegionDef definitions and projection params
-    sources.py       # Radar source classes (MRMS, IEM, MSC Canada, MARN, OPERA)
+    sources.py       # Radar source classes (MRMS, IEM, MSC Canada, MARN, OPERA, CWA)
     fetcher.py       # Multi-source fetch orchestrator
     store.py         # FrameStore (RadarFrame ring buffer)
     coverage.py      # Radar station coverage masks
@@ -74,8 +74,8 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 
 ## Architecture Notes
 
-- **Multi-region:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA)
-- **Region groups:** CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, ALL (configured via `LIBREWXR_ENABLED_REGIONS`)
+- **Multi-region:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA), Taiwan (TWCOMP)
+- **Region groups:** CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, TAIWAN, ALL (configured via `LIBREWXR_ENABLED_REGIONS`)
 - **NA source:** 3-way `LIBREWXR_NA_SOURCE` setting — `mrms_fallback` (default: MRMS + IEM/MSC fallback), `mrms` (MRMS only), `iem` (legacy IEM + MSC)
 - **Source dispatch:** `RadarFetcher` routes each region group to the correct source class
 - **Frame cadence:** 10 minutes, clock-aligned to match Rain Viewer
@@ -88,6 +88,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **Memory management:** Radar frames, ECMWF grids, and nowcast data use numpy memmap (temp files); radar fetcher skips timestamps already in store
 - **MRMS:** Region-aware — separate `MRMSSource` per product path (CONUS, ALASKA, HAWAII, CARIB, GUAM); directory listing with bisect for archive lookups; gzip retry + eccodes stderr suppression
 - **MARN/SNET (El Salvador):** Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from anonymous GCS bucket `radar-images-sv`; 5-min cadence; filename embeds local time (UTC-6, no DST); decoder maps HSV-style continuous hue gradient (green→cyan→blue→magenta) to dBZ; bucket archive depth ~24 h; MARN license requires citation
+- **CWA (Taiwan):** 7-radar QPESUMS composite (`O-A0059-001` / 雷達合成回波) from anonymous AWS S3 bucket `cwaopendata` in `ap-northeast-1`; 10-min cadence; archive key uses UTC+8 timestamp with no separator dot (`{YYYYMMDDHHMM}compref_mosaic.xml`); XML format with raw dBZ as comma-separated scientific-notation floats; data is row-major south-to-north → vertical flip on decode; sentinels `-99`/`-999`; OGDL v1.0 license, attribution required
 
 ## Adding a New Region
 

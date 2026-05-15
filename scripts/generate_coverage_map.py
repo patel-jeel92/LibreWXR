@@ -58,6 +58,7 @@ from librewxr.data.radar_stations import (  # noqa: E402
     NEXRAD_PUERTO_RICO,
     NEXRAD_GUAM,
     CANADA_STATIONS,
+    CWA_STATIONS,
     SNET_STATIONS,
     OPERA_STATIONS,
     RADAR_RANGE_KM,
@@ -278,6 +279,11 @@ def build_radar_sources() -> list[Source]:
     # Ireland-and-Britain, etc. where station gaps exceed range.
     for poly in union_of_radar_circles(OPERA_STATIONS, range_for("OPERA")):
         radar.append(Source("OPERA (Europe)", "#9467bd", poly))
+
+    # CWA / QPESUMS Taiwan — 7 S-band radars covering Taiwan + a
+    # substantial W. Pacific buffer for typhoon tracking.
+    for poly in union_of_radar_circles(CWA_STATIONS, range_for("TWCOMP")):
+        radar.append(Source("CWA / QPESUMS (Taiwan)", "#e377c2", poly))
 
     return radar
 
@@ -549,7 +555,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe",
+        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · CWA / QPESUMS Taiwan",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

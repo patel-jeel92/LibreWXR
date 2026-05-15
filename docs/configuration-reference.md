@@ -174,6 +174,15 @@ Base URL for the MARN/SNET (El Salvador) radar bucket on Google Cloud Storage. T
 | **Default** | `https://storage.googleapis.com` |
 | **Type** | string |
 
+### `LIBREWXR_CWA_BASE_URL`
+
+Base URL for the Taiwan CWA QPESUMS composite bucket on AWS S3 (`cwaopendata` in `ap-northeast-1`). The source reads archive XML keys at `/history/Observation/{YYYYMMDDHHMM}compref_mosaic.xml` (no separator dot between the timestamp and the product name). Only used when `TWCOMP` or the `TAIWAN` group is in `LIBREWXR_ENABLED_REGIONS`.
+
+| | |
+|---|---|
+| **Default** | `https://cwaopendata.s3.ap-northeast-1.amazonaws.com` |
+| **Type** | string |
+
 ---
 
 ## Regions
@@ -196,6 +205,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `CANADA` | `CACOMP` | Canada |
 | `CENTRAL_AMERICA` | `SVCOMP` | El Salvador + W. Honduras + S. Guatemala + offshore Pacific |
 | `EUROPE` | `OPERA` | Pan-European composite (~155 radars, 24 countries) |
+| `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
 | `ALL` | All of the above | Every available region |
 
 **Individual regions:**
@@ -210,6 +220,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `CACOMP` | Canada | MSC GeoMet (MRMS blending) | 3560 x 1720 | 0.025° (~2.5km) | ~6 MB |
 | `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | 409 x 342 | 0.00926° (~1km) | <1 MB |
 | `OPERA` | Europe | EUMETNET OPERA (MeteoGate S3) | 3800 x 4400 | 1km (LAEA) | ~16 MB |
+| `TWCOMP` | Taiwan + W. Pacific | CWA QPESUMS (cwaopendata S3) | 921 x 881 | 0.0125° (~1.4km) | ~3 MB |
 
 **Examples:**
 ```bash

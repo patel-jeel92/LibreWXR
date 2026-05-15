@@ -122,6 +122,17 @@ REGIONS: dict[str, RegionDef] = {
         grid_x_min=0.0, grid_y_max=0.0, grid_scale=1000.0,
         grid_width=3800, grid_height=4400,
     ),
+    # Taiwan CWA QPESUMS composite (O-A0059-001) via anonymous AWS S3
+    # (cwaopendata in ap-northeast-1).  XML format with raw dBZ as
+    # scientific-notation floats; 921x881 at 0.0125° (~1.4 km), 10-min
+    # cadence.  Row-major south-to-north → vertical flip on decode.
+    # Datum is TWD67 (sub-pixel offset vs WGS84 at this resolution).
+    "TWCOMP": RegionDef(
+        name="TWCOMP",
+        west=115.0, east=126.5125, south=18.0, north=29.0125,
+        pixel_size=0.0125, group="TAIWAN",
+        grid_width=921, grid_height=881,
+    ),
 }
 
 # Group aliases: shorthand names that expand to multiple regions.
@@ -132,6 +143,7 @@ REGION_GROUPS: dict[str, list[str]] = {
     "CENTRAL_AMERICA": ["SVCOMP"],
     "CONUS": ["USCOMP"],
     "EUROPE": ["OPERA"],
+    "TAIWAN": ["TWCOMP"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
 }
 

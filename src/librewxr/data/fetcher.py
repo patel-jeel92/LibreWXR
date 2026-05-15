@@ -22,6 +22,7 @@ from librewxr.data.hrrr_grid import HRRRGrid
 from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import (
+    CWASource,
     IEMSource,
     MARNSource,
     MRMS_EXTENTS,
@@ -93,12 +94,14 @@ class RadarFetcher:
         #   CANADA           → MSCCanadaSource
         #   CENTRAL_AMERICA  → MARNSource
         #   EUROPE           → OperaSource
+        #   TAIWAN           → CWASource
         #   US               → MRMSSource (when na_source uses mrms) or IEMSource
         self._sources: dict[
             str,
-            IEMSource | MARNSource | MRMSSource | MSCCanadaSource | OperaSource,
+            CWASource | IEMSource | MARNSource | MRMSSource | MSCCanadaSource | OperaSource,
         ] = {}
         canada_source: MSCCanadaSource | None = None
+        cwa_source: CWASource | None = None
         marn_source: MARNSource | None = None
         iem_source: IEMSource | None = None
         opera_source: OperaSource | None = None
@@ -131,6 +134,10 @@ class RadarFetcher:
                 if opera_source is None:
                     opera_source = OperaSource(settings.opera_base_url)
                 self._sources[region.name] = opera_source
+            elif region.group == "TAIWAN":
+                if cwa_source is None:
+                    cwa_source = CWASource(settings.cwa_base_url)
+                self._sources[region.name] = cwa_source
             else:
                 # Default for US-group regions when not using MRMS.
                 if iem_source is None:

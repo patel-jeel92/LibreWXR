@@ -19,7 +19,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
-- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam) via NOAA MRMS quality-controlled mosaics with IEM fallback, Europe (OPERA pan-European composite, ~155 radars across 24 countries), Canada (MSC GeoMet with MRMS blending), and Central America (MARN/SNET El Salvador, 120 km)
+- **Multi-region coverage** — US (CONUS, Alaska, Hawaii, Puerto Rico, Guam) via NOAA MRMS quality-controlled mosaics with IEM fallback, Europe (OPERA pan-European composite, ~155 radars across 24 countries), Canada (MSC GeoMet with MRMS blending), Central America (MARN/SNET El Salvador, 120 km), and Taiwan (CWA QPESUMS 7-radar composite, 1.4 km observed dBZ)
 - **Regional NWP chain** — high-resolution rapid-refresh NWP models layered specificity-first: NOAA HRRR (CONUS + Alaska), ECCC HRDPS (Canada + N. CONUS), DMI HARMONIE-AROME DINI (most of populated Europe), DWD ICON-EU (the European remainder), Météo-France AROME Antilles (eastern Caribbean), and SMN WRF-DET (Argentina + S. American Cone), all on top of ECMWF IFS for global coverage. Soft-feathering at each domain edge prevents visible seams
 - **ECMWF IFS global coverage** — ECMWF IFS 9 km precipitation data provides global precipitation animation and powers the nowcast everywhere the regional NWP chain doesn't reach. Multi-timestep animation auto-scales to match radar history length
 - **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global IFS coverage animates smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
@@ -348,8 +348,9 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `CACOMP` | Canada | MSC GeoMet (MRMS blending) | 0.025° (~2.5km) | ~6 MB |
 | `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | 0.00926° (~1km) | <1 MB |
 | `OPERA` | Europe (24 countries) | EUMETNET OPERA | 1km | ~16 MB |
+| `TWCOMP` | Taiwan + W. Pacific buffer | CWA QPESUMS (7-radar composite) | 0.0125° (~1.4km) | ~3 MB |
 
-Group aliases: `CONUS` (continental US only), `US` (all US regions), `CANADA` (Canada), `CENTRAL_AMERICA` (El Salvador + W. Honduras + S. Guatemala + offshore Pacific), `EUROPE` (OPERA pan-European composite), `ALL` (everything).
+Group aliases: `CONUS` (continental US only), `US` (all US regions), `CANADA` (Canada), `CENTRAL_AMERICA` (El Salvador + W. Honduras + S. Guatemala + offshore Pacific), `EUROPE` (OPERA pan-European composite), `TAIWAN` (CWA QPESUMS composite covering Taiwan + offshore Pacific), `ALL` (everything).
 You can also mix groups and individual regions: `CONUS,EUROPE,CANADA`.
 
 Examples:
@@ -532,6 +533,7 @@ docker compose -f docker-compose.multiworker.yml up -d
 - **Canada:** ECCC MSC GeoMet WMS — pre-colored PNG precipitation composite, decoded via palette reverse-engineering back to dBZ. MRMS blending fills gaps in northern Canada and the Atlantic coast.
 - **Central America (El Salvador):** MARN/SNET San Andrés radar via anonymous Google Cloud Storage bucket — 120 km product covering all of El Salvador + western Honduras + southern Guatemala + offshore Pacific, 5-min cadence. Continuous HSV hue gradient decoded back to dBZ. Use of MARN/SNET data requires citation per their open-data terms.
 - **Europe:** EUMETNET OPERA CIRRUS composite via MeteoGate S3 — ODIM HDF5, 3800×4400 at 1 km (LAEA), ~155 radars across 24 countries.
+- **Taiwan:** CWA QPESUMS 7-radar composite (`O-A0059-001` / 雷達合成回波) via anonymous AWS S3 bucket `cwaopendata` in `ap-northeast-1` — UTF-8 XML with raw dBZ at 1.4 km / 10-min cadence, covering Taiwan + a substantial western Pacific buffer for typhoon tracking. Filename timestamps are Taipei local time (UTC+8); data uses TWD67 datum (sub-pixel offset vs WGS84 at this resolution). OGDL v1.0 attribution required.
 - **Regional NWP (layered ahead of IFS):**
   - **NOAA HRRR-CONUS** (3 km LCC, 15-min subh, hourly cycles) — anonymous AWS Open Data
   - **NOAA HRRR-Alaska** (3 km polar stereographic, hourly wrfsfcf, 3-hourly cycles)
@@ -613,13 +615,14 @@ LibreWXR uses the following freely available data:
 - **[ECCC MSC GeoMet](https://eccc-msc.github.io/open-data/msc-geomet/readme_en/)** — Canadian weather radar composite (RADAR_1KM_RRAI via WMS)
 - **[MARN / SNET](https://www.snet.gob.sv/)** — Servicio Nacional de Estudios Territoriales (Ministerio de Medio Ambiente y Recursos Naturales, El Salvador), San Andrés 120 km radar product. Reproduced with attribution per MARN's open-data permission.
 - **[EUMETNET OPERA](https://www.eumetnet.eu/activities/observations-programme/current-activities/opera/)** — Pan-European CIRRUS radar composite via [MeteoGate](https://meteogate.eu/) S3 (~155 radars, 24 countries, ODIM HDF5)
+- **[CWA QPESUMS](https://www.cwa.gov.tw/)** — Central Weather Administration of Taiwan, 7-radar composite reflectivity product `O-A0059-001` via the `cwaopendata` AWS bucket. Licensed under the [Open Government Data License v1.0](https://data.gov.tw/license) (資料來源：中央氣象署 / Source: Central Weather Administration, Taiwan).
 - **[ECMWF IFS](https://www.ecmwf.int/) via [Open-Meteo](https://open-meteo.com/)** — ECMWF IFS 9km global precipitation, snowfall, and cloud cover. The global base layer for precipitation animation, nowcast extrapolation outside the regional NWP chain, and the satellite cloud tiles (CC-BY-4.0, data provided by Open-Meteo.com)
 
 All sources are provided by government-funded institutions and are freely available for any use. ECMWF IFS data is provided by Open-Meteo under the [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) license.
 
 ## Current Limitations
 
-- **Limited radar coverage outside US / Canada / Europe / Central America** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, El Salvador and its neighbours, and Europe (via OPERA). Everywhere else uses the regional NWP chain on top of ECMWF IFS for the precipitation layer — that's a complete picture of global precipitation, but it's modelled output, not direct radar observation
+- **Limited radar coverage outside US / Canada / Europe / Central America / Taiwan** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, El Salvador and its neighbours, Europe (via OPERA), and Taiwan (CWA QPESUMS). Everywhere else uses the regional NWP chain on top of ECMWF IFS for the precipitation layer — that's a complete picture of global precipitation, but it's modelled output, not direct radar observation
 - **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with ECMWF IFS, which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
 - **Satellite is IFS-derived, not real imagery** — the satellite layer composites ECMWF IFS cloud cover fields rather than using actual satellite observations, so it reflects model output rather than real-time conditions. Update cadence is hourly (matching IFS), not the ~15-minute cadence of real geostationary satellites
 

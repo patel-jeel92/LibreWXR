@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     # bucket ``radar-images-sv``.  5-min cadence, PNG with HSV-style hue
     # gradient.  Region group: CENTRAL_AMERICA.
     marn_base_url: str = "https://storage.googleapis.com"
+    # Taiwan CWA QPESUMS composite (O-A0059-001) via anonymous AWS S3
+    # (``cwaopendata`` in ``ap-northeast-1``).  10-min cadence, XML format,
+    # raw dBZ in scientific-notation floats.  Region group: TAIWAN.
+    cwa_base_url: str = (
+        "https://cwaopendata.s3.ap-northeast-1.amazonaws.com"
+    )
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
