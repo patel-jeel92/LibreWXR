@@ -96,6 +96,17 @@ REGIONS: dict[str, RegionDef] = {
         west=-141.0, east=-52.0, south=41.0, north=84.0,
         pixel_size=0.025, group="CANADA",
     ),
+    # El Salvador MARN/SNET — single S-band radar at San Andrés, 120 km
+    # product.  PNG with RGB palette; anonymous Google Cloud Storage bucket
+    # (radar-images-sv); 5-min cadence.  Pixel grid is slightly anisotropic
+    # (~0.926 km lon × ~1.02 km lat — set both pixel sizes explicitly).
+    "SVCOMP": RegionDef(
+        name="SVCOMP",
+        west=-90.833, east=-87.044, south=12.112, north=15.244,
+        pixel_size=0.00926, pixel_size_y=0.00916,
+        group="CENTRAL_AMERICA",
+        grid_width=409, grid_height=342,
+    ),
     # OPERA pan-European CIRRUS composite via MeteoGate S3
     # LAEA projection: +proj=laea +lat_0=55 +lon_0=10 +x_0=1950000 +y_0=-2100000 +ellps=WGS84
     # 3800x4400 at 1 km, 5-minute cadence, ODIM HDF5 with float64 dBZ
@@ -118,6 +129,7 @@ REGIONS: dict[str, RegionDef] = {
 # groups are added.
 REGION_GROUPS: dict[str, list[str]] = {
     "CANADA": ["CACOMP"],
+    "CENTRAL_AMERICA": ["SVCOMP"],
     "CONUS": ["USCOMP"],
     "EUROPE": ["OPERA"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],

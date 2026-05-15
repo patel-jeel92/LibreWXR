@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     msc_canada_base_url: str = "https://geo.weather.gc.ca"
     mrms_base_url: str = "https://mrms.ncep.noaa.gov/2D"
     opera_base_url: str = "https://s3.waw3-1.cloudferro.com"
+    # El Salvador MARN/SNET 120 km radar via anonymous Google Cloud Storage
+    # bucket ``radar-images-sv``.  5-min cadence, PNG with HSV-style hue
+    # gradient.  Region group: CENTRAL_AMERICA.
+    marn_base_url: str = "https://storage.googleapis.com"
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"

@@ -165,6 +165,15 @@ Base URL for the OPERA CIRRUS composite S3 bucket (European radar via MeteoGate)
 | **Default** | `https://s3.waw3-1.cloudferro.com` |
 | **Type** | string |
 
+### `LIBREWXR_MARN_BASE_URL`
+
+Base URL for the MARN/SNET (El Salvador) radar bucket on Google Cloud Storage. The source reads the `radar-images-sv` bucket anonymously under this host. Only used when `SVCOMP` or the `CENTRAL_AMERICA` group is in `LIBREWXR_ENABLED_REGIONS`.
+
+| | |
+|---|---|
+| **Default** | `https://storage.googleapis.com` |
+| **Type** | string |
+
 ---
 
 ## Regions
@@ -185,6 +194,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `CONUS` | `USCOMP` | Continental US only (lightest option) |
 | `US` | `USCOMP`, `AKCOMP`, `HICOMP`, `PRCOMP`, `GUCOMP` | All US regions |
 | `CANADA` | `CACOMP` | Canada |
+| `CENTRAL_AMERICA` | `SVCOMP` | El Salvador + W. Honduras + S. Guatemala + offshore Pacific |
 | `EUROPE` | `OPERA` | Pan-European composite (~155 radars, 24 countries) |
 | `ALL` | All of the above | Every available region |
 
@@ -198,6 +208,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `PRCOMP` | Puerto Rico | NCEP MRMS (IEM fallback) | 1000 x 1000 | 0.01° (~1km) | ~1 MB |
 | `GUCOMP` | Guam | NCEP MRMS (IEM fallback) | 1000 x 1000 | 0.0085° (~850m) | ~1 MB |
 | `CACOMP` | Canada | MSC GeoMet (MRMS blending) | 3560 x 1720 | 0.025° (~2.5km) | ~6 MB |
+| `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | 409 x 342 | 0.00926° (~1km) | <1 MB |
 | `OPERA` | Europe | EUMETNET OPERA (MeteoGate S3) | 3800 x 4400 | 1km (LAEA) | ~16 MB |
 
 **Examples:**

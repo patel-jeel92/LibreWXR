@@ -23,6 +23,7 @@ from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.data.sources import (
     IEMSource,
+    MARNSource,
     MRMS_EXTENTS,
     MRMS_PRODUCTS,
     MRMSSource,
@@ -89,14 +90,16 @@ class RadarFetcher:
         #
         # Group → source class dispatch (kept alphabetical; extend by
         # adding a new ``elif region.group == "X":`` branch below):
-        #   CANADA  → MSCCanadaSource
-        #   EUROPE  → OperaSource
-        #   US      → MRMSSource (when na_source uses mrms) or IEMSource
+        #   CANADA           → MSCCanadaSource
+        #   CENTRAL_AMERICA  → MARNSource
+        #   EUROPE           → OperaSource
+        #   US               → MRMSSource (when na_source uses mrms) or IEMSource
         self._sources: dict[
             str,
-            IEMSource | MRMSSource | MSCCanadaSource | OperaSource,
+            IEMSource | MARNSource | MRMSSource | MSCCanadaSource | OperaSource,
         ] = {}
         canada_source: MSCCanadaSource | None = None
+        marn_source: MARNSource | None = None
         iem_source: IEMSource | None = None
         opera_source: OperaSource | None = None
         # Keyed by MRMS product path so regions sharing a product (e.g.
@@ -120,6 +123,10 @@ class RadarFetcher:
                 if canada_source is None:
                     canada_source = MSCCanadaSource(settings.msc_canada_base_url)
                 self._sources[region.name] = canada_source
+            elif region.group == "CENTRAL_AMERICA":
+                if marn_source is None:
+                    marn_source = MARNSource(settings.marn_base_url)
+                self._sources[region.name] = marn_source
             elif region.group == "EUROPE":
                 if opera_source is None:
                     opera_source = OperaSource(settings.opera_base_url)

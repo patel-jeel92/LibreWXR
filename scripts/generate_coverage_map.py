@@ -58,6 +58,7 @@ from librewxr.data.radar_stations import (  # noqa: E402
     NEXRAD_PUERTO_RICO,
     NEXRAD_GUAM,
     CANADA_STATIONS,
+    SNET_STATIONS,
     OPERA_STATIONS,
     RADAR_RANGE_KM,
     REGION_RADAR_RANGE,
@@ -264,6 +265,13 @@ def build_radar_sources() -> list[Source]:
     # MSC Canada — ECCC's 32 S-band dual-pol stations at 240 km each.
     for poly in union_of_radar_circles(CANADA_STATIONS, range_for("CACOMP")):
         radar.append(Source("MSC Canada radar", "#17becf", poly))
+
+    # MARN/SNET (El Salvador) — single S-band radar at San Andrés volcano
+    # publishing a 120 km range product.  Smallest radar footprint in the
+    # ensemble; fills the Central American gap between MRMS Caribbean and
+    # the South American Cone NWP coverage.
+    for poly in union_of_radar_circles(SNET_STATIONS, range_for("SVCOMP")):
+        radar.append(Source("MARN/SNET (El Salvador)", "#bcbd22", poly))
 
     # OPERA — ~155 European stations at 300 km each (C-band).  The
     # union naturally splits into a continental piece, Iceland,
@@ -541,7 +549,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · OPERA Europe",
+        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

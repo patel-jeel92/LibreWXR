@@ -29,6 +29,11 @@ RADAR_RANGE_KM = 240.0
 # visible ECMWF/OPERA overlap seams.
 REGION_RADAR_RANGE: dict[str, float] = {
     "OPERA": 300.0,
+    # SNET ``esar82`` product is explicitly the 120 km range overlay
+    # (single S-band radar at San Andrés).  The default 240 km would
+    # overstate coverage by 2× and bleed past the product's footprint
+    # into Honduras / Nicaragua where no actual returns exist.
+    "SVCOMP": 120.0,
 }
 
 # NEXRAD WSR-88D stations covering USCOMP (continental US).
@@ -479,6 +484,14 @@ OPERA_STATIONS: list[tuple[float, float]] = [
 ]
 
 
+# SNET (El Salvador) — single S-band radar at San Andrés volcano.
+# Coordinates from the viewer's ``center = [13.687, -88.883]`` JS variable
+# (snet.gob.sv/googlemaps/radares/radaresSV8.php).  120 km product, so the
+# range override above applies to the SVCOMP mask.
+SNET_STATIONS: list[tuple[float, float]] = [
+    (13.687, -88.883),   # San Andrés
+]
+
 # Per-region station mapping for coverage mask generation.
 # Regions not listed here skip mask generation (full-region coverage assumed).
 REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
@@ -488,6 +501,7 @@ REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
     "PRCOMP": NEXRAD_PUERTO_RICO,
     "GUCOMP": NEXRAD_GUAM,
     "CACOMP": CANADA_STATIONS,
+    "SVCOMP": SNET_STATIONS,
     "OPERA": OPERA_STATIONS,
 }
 
