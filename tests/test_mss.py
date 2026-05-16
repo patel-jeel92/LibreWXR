@@ -210,6 +210,32 @@ def _make_native_png(value: int = 26) -> bytes:
     return buf.getvalue()
 
 
+def _make_translating_png(box_row: int, box_col: int, value: int = 5) -> bytes:
+    """Render a 480x480 RGBA PNG with a high-dBZ box at (row, col).
+
+    Used by the extrapolation tests: by varying ``box_row`` / ``box_col``
+    across native frames we get genuine translational motion that
+    Farneback can pick up, so the warp + remap actually moves pixels
+    and the extrapolated frame can be distinguished from the basis.
+    """
+    bg_r, bg_g, bg_b, _ = _MSS_PALETTE[0]  # background (low dBZ)
+    fg_r, fg_g, fg_b, _ = _MSS_PALETTE[value]
+    arr = np.zeros((480, 480, 4), dtype=np.uint8)
+    arr[..., 0] = bg_r
+    arr[..., 1] = bg_g
+    arr[..., 2] = bg_b
+    arr[..., 3] = 255
+    # 80x80 high-intensity box at the requested position.
+    r0, c0 = box_row, box_col
+    arr[r0:r0 + 80, c0:c0 + 80, 0] = fg_r
+    arr[r0:r0 + 80, c0:c0 + 80, 1] = fg_g
+    arr[r0:r0 + 80, c0:c0 + 80, 2] = fg_b
+    img = Image.fromarray(arr, mode="RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class TestNativeTsRounding:
     """Bracket pair derivation — the math underneath fetch_for_ts."""
 
@@ -362,25 +388,40 @@ class TestBracketPairFetch:
         ts_prev = int(datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc).timestamp())
         assert list(src._fetch_log.keys()) == [ts_prev]
 
-    async def test_next_bracket_404_falls_back_to_prev_native(self, monkeypatch):
+    async def test_next_bracket_404_extrapolates_from_prior_pair(self, monkeypatch):
         """If the future bracket end isn't published yet (common for
-        the most-recent slot), the source returns the earlier native
-        rather than a hole in the timeline."""
+        the most-recent slot), forward-extrapolate from the PRIOR
+        native pair so the leading-edge slot is distinct from ts_prev
+        rather than a duplicate hold-frame.
+
+        Pre-fix behaviour: returned ts_prev as a hold-frame, three
+        consecutive store slots in the latest 30-min window were
+        byte-identical, freezing the animation and zeroing the
+        nowcast's seed flow.
+        """
         src = MSSSource(interpolation=True)
+
+        # The two prior natives have the high-intensity box at different
+        # positions, so Farneback picks up real translational motion that
+        # the warp can apply when extrapolating past ts_prev.
+        natives_by_utc = {
+            datetime(2026, 5, 15, 9, 30, 0, tzinfo=timezone.utc): (100, 100),
+            datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc): (140, 140),
+        }
 
         async def fake_get_client():
             return None
 
         async def fake_retry_get(client, url, log_name=None):
-            # Filename is SGT; convert back to UTC for the comparison.
             fname = url.rsplit("/", 1)[-1]
             ts_str = fname.split("_")[2][:12]
             sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
             utc_native = sgt - timedelta(hours=8)
-            # Pretend everything at or after the future bracket (10:30 UTC) is unpublished.
+            # Anything at or after 10:30 UTC is unpublished.
             if utc_native >= datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc):
                 return _FakeResp(404)
-            return _FakeResp(200, _make_native_png(value=5))
+            row, col = natives_by_utc.get(utc_native, (200, 200))
+            return _FakeResp(200, _make_translating_png(row, col))
 
         monkeypatch.setattr(src, "_get_client", fake_get_client)
         monkeypatch.setattr(
@@ -388,12 +429,239 @@ class TestBracketPairFetch:
         )
 
         region = REGIONS["SEACOMP"]
-        # Ask for 10:20: bracket pair is (10:00, 10:30). 10:30 is 404.
-        # Expect 10:00 native returned, no flow computed.
+        # Ask for 10:20: bracket pair is (10:00, 10:30); 10:30 is 404.
+        # Expect a frame extrapolated from the prior pair (9:30, 10:00).
         dt = datetime(2026, 5, 15, 10, 20, 0, tzinfo=timezone.utc)
-        frame = await src.fetch_archive_frame(region, dt)
-        assert frame is not None
-        assert len(src._flow_cache) == 0  # no interp without both ends
+        extrap = await src.fetch_archive_frame(region, dt)
+        assert extrap is not None
+
+        # Flow is cached against the PRIOR pair, not the unfetchable
+        # bracket pair.
+        ts_prior = int(datetime(2026, 5, 15, 9, 30, 0, tzinfo=timezone.utc).timestamp())
+        ts_prev = int(datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        assert (ts_prior, ts_prev) in src._flow_cache
+
+        # And the extrapolated frame is distinct from the ts_prev native
+        # — proving we actually warped instead of returning a hold-frame.
+        prev_native = await src.fetch_archive_frame(
+            region,
+            datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc),
+        )
+        assert not np.array_equal(extrap, prev_native)
+
+    async def test_leading_edge_three_slots_are_distinct(self, monkeypatch):
+        """The Nowcast-blend-into-animation symptom that drove the
+        forward-extrapolation: the latest 30-min window's three
+        store slots (aligned native + two sub-intervals where the
+        future bracket is 404) must all differ, otherwise nowcast
+        sees zero motion in its last two radar frames and the
+        animation freezes on the latest frame.
+        """
+        src = MSSSource(interpolation=True)
+
+        natives_by_utc = {
+            datetime(2026, 5, 15, 9, 30, 0, tzinfo=timezone.utc): (100, 100),
+            datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc): (140, 140),
+        }
+
+        async def fake_get_client():
+            return None
+
+        async def fake_retry_get(client, url, log_name=None):
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native = sgt - timedelta(hours=8)
+            if utc_native >= datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc):
+                return _FakeResp(404)
+            row, col = natives_by_utc.get(utc_native, (200, 200))
+            return _FakeResp(200, _make_translating_png(row, col))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+
+        region = REGIONS["SEACOMP"]
+        frames = []
+        for minute in (0, 10, 20):
+            dt = datetime(2026, 5, 15, 10, minute, 0, tzinfo=timezone.utc)
+            f = await src.fetch_archive_frame(region, dt)
+            assert f is not None
+            frames.append(f)
+        # Aligned ts_prev (10:00) is the real native; the two sub-interval
+        # slots are forward-extrapolations at t=1/3 and t=2/3.  All three
+        # must differ.
+        assert not np.array_equal(frames[0], frames[1])
+        assert not np.array_equal(frames[1], frames[2])
+        assert not np.array_equal(frames[0], frames[2])
+
+
+class TestAlignedMissingNative:
+    """Aligned ts whose native isn't yet published returns None so the
+    fetcher re-attempts on its next cycle (rather than walking back and
+    stamping older content under that ts — that's what stuck the live
+    pipeline on stale frames at the 10:00 SGT boundary).
+    """
+
+    async def test_aligned_missing_returns_none(self, monkeypatch):
+        src = MSSSource(interpolation=True)
+
+        async def fake_get_client():
+            return None
+
+        async def fake_retry_get(client, url, log_name=None):
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native = sgt - timedelta(hours=8)
+            # 10:00 UTC native (= 18:00 SGT) is "not yet published".
+            if utc_native == datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc):
+                return _FakeResp(404)
+            return _FakeResp(200, _make_translating_png(100, 100))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+
+        region = REGIONS["SEACOMP"]
+        # Aligned 10:00 native is 404 — must return None, not the older
+        # native walked back from 9:30.
+        result = await src.fetch_archive_frame(
+            region,
+            datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc),
+        )
+        assert result is None
+
+    async def test_aligned_native_publishes_after_initial_miss(self, monkeypatch):
+        """Once a previously-404 native publishes (and the None-cache
+        TTL elapses), the next fetch picks it up — proving the
+        TTL-based negative cache doesn't wedge the leading edge."""
+        src = MSSSource(interpolation=True)
+        # Shorten the TTL so the test doesn't have to sleep 2 min.
+        monkeypatch.setattr(MSSSource, "_NONE_CACHE_TTL_SEC", 0.0)
+
+        publish_state = {"published": False}
+
+        async def fake_get_client():
+            return None
+
+        async def fake_retry_get(client, url, log_name=None):
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native = sgt - timedelta(hours=8)
+            target = datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc)
+            if utc_native == target and not publish_state["published"]:
+                return _FakeResp(404)
+            return _FakeResp(200, _make_translating_png(100, 100))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+
+        region = REGIONS["SEACOMP"]
+        dt = datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc)
+        # First call: not yet published.
+        first = await src.fetch_archive_frame(region, dt)
+        assert first is None
+        # Upstream publishes.
+        publish_state["published"] = True
+        # Second call (after the now-stale None expires): real frame.
+        second = await src.fetch_archive_frame(region, dt)
+        assert second is not None
+
+    async def test_both_brackets_missing_walks_back_to_extrapolate(
+        self, monkeypatch,
+    ):
+        """When BOTH bracket natives are missing for a sub-interval ts
+        (e.g. an MSS outage spanning the latest 30-min window), the
+        source falls back to extrapolating from an older basis pair.
+        Capped at :attr:`_MAX_EXTRAP_T_FORWARD` past the basis.
+        """
+        src = MSSSource(interpolation=True)
+
+        async def fake_get_client():
+            return None
+
+        async def fake_retry_get(client, url, log_name=None):
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native = sgt - timedelta(hours=8)
+            # Both bracket natives at 10:00 and 10:30 UTC are 404,
+            # forcing the walk-back path.
+            blocked = (
+                datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc),
+                datetime(2026, 5, 15, 10, 30, 0, tzinfo=timezone.utc),
+            )
+            if utc_native in blocked:
+                return _FakeResp(404)
+            # 9:00 and 9:30 form the basis pair.
+            row, col = {
+                datetime(2026, 5, 15, 9, 0, 0, tzinfo=timezone.utc): (100, 100),
+                datetime(2026, 5, 15, 9, 30, 0, tzinfo=timezone.utc): (140, 140),
+            }.get(utc_native, (200, 200))
+            return _FakeResp(200, _make_translating_png(row, col))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+
+        region = REGIONS["SEACOMP"]
+        # ts=10:10 sub-interval; brackets are (10:00, 10:30), both 404.
+        # Walk-back finds (9:00, 9:30) as basis pair, extrapolates
+        # forward to 10:10 (= t_forward (10:10 - 9:30) / 30 = 1.333).
+        extrap = await src.fetch_archive_frame(
+            region,
+            datetime(2026, 5, 15, 10, 10, 0, tzinfo=timezone.utc),
+        )
+        assert extrap is not None
+        ts_basis = int(datetime(2026, 5, 15, 9, 30, 0, tzinfo=timezone.utc).timestamp())
+        ts_prior = int(datetime(2026, 5, 15, 9, 0, 0, tzinfo=timezone.utc).timestamp())
+        assert (ts_prior, ts_basis) in src._flow_cache
+
+    async def test_extrapolation_caps_at_max_forward_distance(self, monkeypatch):
+        """Walk-back extrapolation refuses to fabricate frames more
+        than :attr:`_MAX_EXTRAP_T_FORWARD` cadences past the basis —
+        Farneback flow stops being predictive that far out.
+        """
+        src = MSSSource(interpolation=True)
+
+        async def fake_get_client():
+            return None
+
+        async def fake_retry_get(client, url, log_name=None):
+            fname = url.rsplit("/", 1)[-1]
+            ts_str = fname.split("_")[2][:12]
+            sgt = datetime.strptime(ts_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            utc_native = sgt - timedelta(hours=8)
+            # Everything from 10:00 UTC onward is 404 — long outage at
+            # the leading edge.
+            if utc_native >= datetime(2026, 5, 15, 10, 0, 0, tzinfo=timezone.utc):
+                return _FakeResp(404)
+            row, col = {
+                datetime(2026, 5, 15, 9, 0, 0, tzinfo=timezone.utc): (100, 100),
+                datetime(2026, 5, 15, 9, 30, 0, tzinfo=timezone.utc): (140, 140),
+            }.get(utc_native, (200, 200))
+            return _FakeResp(200, _make_translating_png(row, col))
+
+        monkeypatch.setattr(src, "_get_client", fake_get_client)
+        monkeypatch.setattr(
+            "librewxr.data.sources.retry_get", fake_retry_get,
+        )
+
+        region = REGIONS["SEACOMP"]
+        # ts=11:10 sub-interval; basis would be 9:30, t_forward =
+        # (11:10 - 9:30) / 30 = 100/30 = 3.33, far above the 1.5 cap.
+        result = await src.fetch_archive_frame(
+            region,
+            datetime(2026, 5, 15, 11, 10, 0, tzinfo=timezone.utc),
+        )
+        assert result is None
 
 
 class TestSeacompTileOverlap:

@@ -1463,6 +1463,16 @@ class MSSSource:
     # Walk back up to 4 prior native slots (= 2 h) before giving up —
     # covers transient outages without spamming an unfindable archive.
     _MAX_FALLBACK_STEPS = 4
+    # Cap forward extrapolation at 1.5 native cadences (= 45 min) past
+    # the basis pair's later frame.  Beyond that Farneback flow stops
+    # being a credible motion estimator.
+    _MAX_EXTRAP_T_FORWARD = 1.5
+    # How long to remember a confirmed 404 before re-attempting the
+    # fetch.  Short enough that the leading-edge native (which
+    # publishes ~3 min into its slot) gets re-fetched on the next
+    # 10-min cycle, long enough to coalesce parallel sub-interval
+    # requests within a single cycle.
+    _NONE_CACHE_TTL_SEC = 120
     # Soft caps on the native + flow caches.  Each native frame is
     # 480x480 uint8 ≈ 230 KB; each flow field is 480x480x2 float32 ≈
     # 1.8 MB.  At 12 native frames + 8 flow pairs the cap is well
@@ -1480,8 +1490,12 @@ class MSSSource:
         self._client: httpx.AsyncClient | None = None
         # native_ts -> decoded uint8 grid; populated lazily.  A None
         # sentinel records a confirmed 404 so adjacent slots don't
-        # re-attempt the same dead URL inside one cycle.
+        # re-attempt the same dead URL inside one cycle.  Paired with
+        # ``_native_cache_time`` for None-entry TTL handling — a 404
+        # cached an hour ago must NOT mask a native that just
+        # published, otherwise the fetcher would skip the slot forever.
         self._native_cache: dict[int, np.ndarray | None] = {}
+        self._native_cache_time: dict[int, float] = {}
         # Per-ts asyncio.Lock so concurrent requests for the same
         # native ts coalesce into one fetch.
         self._native_locks: dict[int, asyncio.Lock] = {}
@@ -1553,48 +1567,119 @@ class MSSSource:
     ) -> np.ndarray | None:
         """Return the frame for a single 10-min store slot.
 
-        For ts aligned with a native 30-min anchor, returns the
-        decoded native frame (with the fallback walk-back if that
-        slot is 404).  For ts strictly between two natives, fetches
-        the bracket pair and either:
-          - returns the optical-flow-blended frame (if
-            ``self._interpolation`` is True and both natives are
-            available), or
-          - returns the earlier native (hold-last-frame fallback).
+        Contract (interpolation=True):
+          * Returns the exact native if ``ts`` is aligned and that
+            native has published.
+          * Returns an interpolated frame if ``ts`` is sub-interval and
+            both bracket natives have published.
+          * Returns a forward-extrapolated frame for the leading-edge
+            sub-interval case (``ts_prev`` published, ``ts_next`` not
+            yet) by warping ``ts_prev`` along the prior pair's flow.
+          * Returns ``None`` for the aligned-missing case (latest 30-min
+            boundary just crossed but MSS hasn't published yet) and for
+            both-missing cases where the basis pair is also out of
+            reach.  Returning None — rather than walking back and
+            handing stale older-native content stamped as ``ts`` —
+            is critical: the fetcher's "skip if region present"
+            optimisation would otherwise stick on the stale fill and
+            never pick up the real native when it appears a few
+            minutes later.
+
+        Contract (interpolation=False): legacy walk-back hold-frame
+        behaviour, kept as an explicit config opt-in.
         """
         ts_prev = self._native_ts_for(ts)
         offset_within_window = ts - ts_prev
 
-        # Aligned case: just the native (with walk-back on 404).
+        if not self._interpolation:
+            # Opt-in legacy mode: hold the most recent available native
+            # across every slot in its 30-min window, walking back on
+            # 404.  Stale-by-design, documented for the config knob.
+            return await self._fetch_native_with_fallback(ts_prev, region)
+
+        # Aligned case: try the exact native; if missing, return None
+        # so the fetcher re-tries on its next cycle once MSS publishes.
+        # Sub-intervals can still extrapolate from the prior pair, but
+        # the aligned slot itself stays empty until real data lands —
+        # the alternative (forward-extrap an aligned slot) would mark
+        # the slot "present" in the store and lock out the eventual
+        # re-fetch.
         if offset_within_window == 0:
-            return await self._fetch_native_with_fallback(ts_prev, region)
+            return await self._fetch_native_cached(ts_prev, region)
 
-        # Sub-interval case.  Try the bracket pair.
+        # Sub-interval case.  Fetch the bracket pair in parallel.
         ts_next = ts_prev + self._CADENCE_SEC
-        if self._interpolation:
-            prev_frame, next_frame = await asyncio.gather(
-                self._fetch_native_cached(ts_prev, region),
-                self._fetch_native_cached(ts_next, region),
+        prev_frame, next_frame = await asyncio.gather(
+            self._fetch_native_cached(ts_prev, region),
+            self._fetch_native_cached(ts_next, region),
+        )
+
+        if prev_frame is not None and next_frame is not None:
+            t = offset_within_window / self._CADENCE_SEC
+            return self._interpolate(ts_prev, ts_next, prev_frame, next_frame, t)
+
+        # Leading-edge: ts_next isn't published yet.  Warp ts_prev
+        # forward along the prior pair's flow so the two sub-interval
+        # slots in this 30-min window are visibly distinct AND give
+        # NowcastGenerator real motion to seed from.
+        if prev_frame is not None and next_frame is None:
+            ts_prior = ts_prev - self._CADENCE_SEC
+            prior_frame = await self._fetch_native_cached(ts_prior, region)
+            if prior_frame is not None:
+                t_forward = offset_within_window / self._CADENCE_SEC
+                return self._extrapolate_forward(
+                    ts_prior, ts_prev, prior_frame, prev_frame, t_forward,
+                )
+            # No prior pair within reach — return None so the fetcher
+            # re-tries.  (Sub-interval falling back to ts_prev as a
+            # hold-frame would re-introduce the stale-fill bug.)
+            return None
+
+        if next_frame is not None and prev_frame is None:
+            # Transient miss of ts_prev while ts_next is fresh — rare
+            # mid-window outage.  ts_next is real "later" data; use it
+            # as an honest (slightly-future) approximation instead of
+            # leaving a hole.
+            return next_frame
+
+        # Both bracket natives missing.  Walk back to a basis pair we
+        # CAN extrapolate from, capped so we don't trust Farneback too
+        # far past the basis.
+        return await self._extrapolate_from_walkback(ts_prev, ts, region)
+
+    async def _extrapolate_from_walkback(
+        self, ts_basis_target: int, ts_target: int, region: RegionDef
+    ) -> np.ndarray | None:
+        """Find the most recent available basis pair and extrapolate to ts_target.
+
+        Walks back from ``ts_basis_target`` in 30-min steps, looking
+        for a native with an immediate predecessor (so we have a flow
+        pair to warp along).  Returns ``None`` if no such pair exists
+        within :attr:`_MAX_FALLBACK_STEPS`, or if the resulting
+        extrapolation distance exceeds :attr:`_MAX_EXTRAP_T_FORWARD`
+        cadences (Farneback flow stops being predictive past that).
+        Used when both bracket natives are missing.
+        """
+        for step in range(self._MAX_FALLBACK_STEPS + 1):
+            basis_ts = ts_basis_target - step * self._CADENCE_SEC
+            basis_frame = await self._fetch_native_cached(basis_ts, region)
+            if basis_frame is None:
+                continue
+            prior_ts = basis_ts - self._CADENCE_SEC
+            prior_frame = await self._fetch_native_cached(prior_ts, region)
+            if prior_frame is None:
+                # Can't compute a flow pair.  If the basis IS the
+                # target, return it; otherwise honest-None.
+                return basis_frame if basis_ts == ts_target else None
+            t_forward = (ts_target - basis_ts) / self._CADENCE_SEC
+            if t_forward <= 0:
+                return basis_frame
+            if t_forward > self._MAX_EXTRAP_T_FORWARD:
+                return None
+            return self._extrapolate_forward(
+                prior_ts, basis_ts, prior_frame, basis_frame, t_forward,
             )
-
-            if prev_frame is not None and next_frame is not None:
-                t = offset_within_window / self._CADENCE_SEC
-                return self._interpolate(ts_prev, ts_next, prev_frame, next_frame, t)
-
-            # Bracket-pair incomplete (most-recent slot not yet
-            # published, or transient miss).  Fall back to whichever
-            # bracket end exists, walking older slots if needed.
-            if prev_frame is not None:
-                return prev_frame
-            if next_frame is not None:
-                return next_frame
-            # Both missing → walk back from ts_prev like a normal
-            # native fetch would.
-            return await self._fetch_native_with_fallback(ts_prev, region)
-
-        # Interpolation disabled → hold-last-frame: return whichever
-        # native covers this 10-min slot's window.
-        return await self._fetch_native_with_fallback(ts_prev, region)
+        return None
 
     async def _fetch_native_with_fallback(
         self, native_ts: int, region: RegionDef
@@ -1624,21 +1709,23 @@ class MSSSource:
     ) -> np.ndarray | None:
         """Return the decoded native frame for *native_ts*, cached.
 
-        Concurrent calls for the same ``native_ts`` coalesce: only
-        the first acquirer of the per-ts lock issues the HTTP fetch;
-        subsequent callers wait on the lock and read the populated
-        cache entry.  404s are also cached (as ``None``) so a missed
-        slot doesn't retrigger on every adjacent fetch within a
-        cycle.
+        Concurrent callers for the same ``native_ts`` coalesce on a
+        per-ts lock so only the first acquirer issues the HTTP fetch.
+
+        404s are cached as ``None`` only for the duration of
+        :attr:`_NONE_CACHE_TTL_SEC` (≈ one fetch cycle).  Beyond that
+        the next call re-attempts — without this TTL the source would
+        permanently miss any native that publishes a few minutes after
+        we first asked for it (the 10:00 SGT publish lag).
         """
-        if native_ts in self._native_cache:
+        if self._native_cache_hit(native_ts):
             return self._native_cache[native_ts]
 
         lock = self._native_locks.setdefault(native_ts, asyncio.Lock())
         async with lock:
             # Re-check after acquiring the lock — another coroutine
             # may have populated the cache while we were waiting.
-            if native_ts in self._native_cache:
+            if self._native_cache_hit(native_ts):
                 return self._native_cache[native_ts]
 
             client = await self._get_client()
@@ -1668,13 +1755,42 @@ class MSSSource:
             self._native_locks.pop(native_ts, None)
             return frame
 
+    def _native_cache_hit(self, native_ts: int) -> bool:
+        """Whether the cache entry for *native_ts* is still trustable.
+
+        Real frames are trusted forever; cached ``None`` entries are
+        only trusted within :attr:`_NONE_CACHE_TTL_SEC` of when they
+        were recorded.  Stale ``None`` entries are evicted in place
+        so the next fetch attempt proceeds normally.
+        """
+        if native_ts not in self._native_cache:
+            return False
+        if self._native_cache[native_ts] is not None:
+            return True
+        cached_at = self._native_cache_time.get(native_ts, 0.0)
+        if time.time() - cached_at < self._NONE_CACHE_TTL_SEC:
+            return True
+        # Stale None: drop both bookkeeping entries so the fetch path
+        # treats this native_ts as never-seen.
+        self._native_cache.pop(native_ts, None)
+        self._native_cache_time.pop(native_ts, None)
+        if native_ts in self._native_order:
+            self._native_order.remove(native_ts)
+        return False
+
     def _cache_native(self, native_ts: int, frame: np.ndarray | None) -> None:
         """Insert into the native cache, evicting oldest on overflow."""
         self._native_cache[native_ts] = frame
-        self._native_order.append(native_ts)
+        self._native_cache_time[native_ts] = time.time()
+        # Only enqueue for FIFO eviction if this is a new key; re-caches
+        # of an existing native (e.g. a re-fetch after a stale None
+        # expired) shouldn't create duplicate eviction entries.
+        if native_ts not in self._native_order:
+            self._native_order.append(native_ts)
         while len(self._native_order) > self._NATIVE_CACHE_MAX:
             evict = self._native_order.pop(0)
             self._native_cache.pop(evict, None)
+            self._native_cache_time.pop(evict, None)
             # Invalidate any flow entries that referenced the evicted
             # native — keeping a stale flow against a missing frame
             # buys nothing and clouds the cache.
@@ -1713,10 +1829,41 @@ class MSSSource:
                 self._flow_cache.pop(evict, None)
         return interp
 
+    def _extrapolate_forward(
+        self,
+        ts_prior: int,
+        ts_prev: int,
+        prior_frame: np.ndarray,
+        prev_frame: np.ndarray,
+        t_forward: float,
+    ) -> np.ndarray:
+        """Warp ``prev_frame`` past ``ts_prev`` by ``t_forward`` * cadence.
+
+        Reuses the same per-pair flow cache as :meth:`_interpolate`, just
+        keyed against the prior pair ``(ts_prior, ts_prev)`` — so when
+        two consecutive sub-interval slots both hit the leading-edge
+        fallback, the second one shares the first one's flow compute.
+        """
+        from librewxr.data.nwp_interpolation import extrapolate_forward
+
+        key = (ts_prior, ts_prev)
+        flow = self._flow_cache.get(key)
+        extrap, computed_flow = extrapolate_forward(
+            prior_frame, prev_frame, t_forward, flow=flow,
+        )
+        if flow is None:
+            self._flow_cache[key] = computed_flow
+            self._flow_order.append(key)
+            while len(self._flow_order) > self._FLOW_CACHE_MAX:
+                evict = self._flow_order.pop(0)
+                self._flow_cache.pop(evict, None)
+        return extrap
+
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
         self._native_cache.clear()
+        self._native_cache_time.clear()
         self._native_locks.clear()
         self._flow_cache.clear()
         self._native_order.clear()

@@ -206,6 +206,62 @@ def interpolate_pair_at_fraction(
     return interp, flow
 
 
+def extrapolate_forward(
+    frame0: np.ndarray,
+    frame1: np.ndarray,
+    t_forward: float,
+    flow: np.ndarray | None = None,
+    downscale: int = _DEFAULT_DOWNSCALE,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Forward-extrapolate past ``frame1`` by warping along the flow.
+
+    Used for the leading-edge case in :class:`MSSSource` and any other
+    radar source whose native cadence is wider than the stored cadence:
+    when the bracket pair ``(T_prev, T_next)`` is incomplete because
+    ``T_next`` isn't published yet, take the prior pair
+    ``(T_prev_minus_native, T_prev)`` and warp ``T_prev`` forward by
+    ``t_forward`` to synthesise the slot at ``T_prev + t_forward *
+    native_cadence``.  Without this the last few store slots all hold
+    the same native, freezing the animation AND starving the nowcast
+    generator of usable motion in its last two radar frames.
+
+    Args:
+        frame0: Earlier native (basis pair, first frame).
+        frame1: Later native (basis pair, second frame and the one
+            we're warping forward).
+        t_forward: How far past ``frame1`` to extrapolate, in units of
+            the basis pair's spacing.  ``t_forward=0`` returns
+            ``frame1`` unchanged; ``t_forward=0.5`` warps half a
+            native-cadence past it.  Values above ~1.0 leave Farneback
+            territory; callers should cap.
+        flow: Optional pre-computed Farneback flow from a prior call on
+            the same pair (e.g. cached by the caller).
+        downscale: Same as :func:`interpolate_run`.
+
+    Returns:
+        ``(extrapolated_frame, flow)``.  Caller may reuse ``flow`` for
+        other sub-interval fractions of the same basis pair.
+    """
+    if t_forward <= 0.0:
+        return frame1.copy(), flow if flow is not None else np.zeros(
+            frame1.shape + (2,), dtype=np.float32,
+        )
+
+    if flow is None:
+        flow = _compute_flow(frame0, frame1, downscale)
+
+    h, w = frame1.shape
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    map_x = xs - t_forward * flow[..., 0]
+    map_y = ys - t_forward * flow[..., 1]
+    extrapolated = cv2.remap(
+        frame1, map_x, map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+    return extrapolated, flow
+
+
 def _compute_flow(
     frame0: np.ndarray,
     frame1: np.ndarray,
