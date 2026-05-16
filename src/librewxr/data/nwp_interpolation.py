@@ -215,8 +215,8 @@ def extrapolate_forward(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Forward-extrapolate past ``frame1`` by warping along the flow.
 
-    Used for the leading-edge case in :class:`MSSSource` and any other
-    radar source whose native cadence is wider than the stored cadence:
+    Used for the leading-edge case in any radar source whose native
+    cadence is wider than the stored cadence:
     when the bracket pair ``(T_prev, T_next)`` is incomplete because
     ``T_next`` isn't published yet, take the prior pair
     ``(T_prev_minus_native, T_prev)`` and warp ``T_prev`` forward by

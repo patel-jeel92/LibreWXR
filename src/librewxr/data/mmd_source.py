@@ -32,6 +32,7 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
+import cv2
 import httpx
 import numpy as np
 from PIL import Image, ImageSequence
@@ -156,6 +157,38 @@ def _extract_region(full_rgb: np.ndarray, region_name: str) -> np.ndarray:
     return full_rgb[y0:y1, x0:x1]
 
 
+# 3×3 kernel for the morphological close that bridges thin holes punched
+# by the GIF's burned-in state-boundary lines.  Matches the observed
+# 1-2 px line width; larger kernels start collapsing real micro-gaps.
+_MMD_GAP_FILL_KERNEL = np.ones((3, 3), np.uint8)
+
+
+def _fill_boundary_gaps(decoded: np.ndarray) -> np.ndarray:
+    """Bridge thin zero-stripes left by burned-in administrative borders.
+
+    The MET GIF renders Malaysian state borders as ~1-2 px dark-gray
+    lines on top of the radar.  These pixels fail the palette-distance
+    check and decode to "no data", so where a border crosses a rainy
+    area the result is a hairline gap in the precipitation field.
+
+    A morphological close on the has-precip mask identifies precisely
+    those bridged-when-closed pixels (i.e. holes small enough that the
+    close fills them).  Each such gap pixel is filled with the max of
+    its 3×3 neighbourhood — which, for a thin line bisecting rain,
+    equals the surrounding dBZ.  Large genuine no-precip areas are
+    untouched because the close cannot bridge them at this kernel size.
+    """
+    mask = (decoded > 0).astype(np.uint8)
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _MMD_GAP_FILL_KERNEL)
+    gap_pixels = (closed > 0) & (mask == 0)
+    if not gap_pixels.any():
+        return decoded
+    dilated = cv2.dilate(decoded, _MMD_GAP_FILL_KERNEL, iterations=1)
+    out = decoded.copy()
+    out[gap_pixels] = dilated[gap_pixels]
+    return out
+
+
 def _decode_mmd_frame(
     frame_rgb: np.ndarray, region: RegionDef,
 ) -> np.ndarray:
@@ -167,6 +200,7 @@ def _decode_mmd_frame(
         )
     sub = _extract_region(frame_rgb, region.name)
     decoded = _decode_mmd_palette(sub)
+    decoded = _fill_boundary_gaps(decoded)
     if decoded.shape != (region.height, region.width):
         raise ValueError(
             f"MMD region {region.name} decoded to {decoded.shape}, "
@@ -191,16 +225,36 @@ def _parse_last_modified(value: str | None) -> int | None:
 
 
 def _frame_timestamps(
-    last_modified_unix: int, publish_lag_sec: int,
+    last_modified_unix: int,
+    publish_lag_sec: int,
+    now_unix: int | None = None,
 ) -> list[int]:
     """Compute the 6 frame timestamps (oldest first) from Last-Modified.
 
-    The GIF lands at the endpoint a fixed-ish lag after the newest
-    frame's data time.  Snap (LM − lag) down to the 10-min grid to get
-    the newest frame's timestamp, then walk back 5 cadences for the
-    rest.  Order matches PIL frame iteration order (oldest at index 0).
+    MET publishes each 10-min slot ~11 minutes after its real data time,
+    which means at any wall-clock ``xx:00`` our fetch lands before MET
+    has uploaded the ``xx:00`` frame — the newest frame on the server is
+    actually ``xx:50``'s data.  Anchoring on the true publish time would
+    therefore leave the renderer's current slot permanently empty.
+
+    Instead we label the newest GIF frame at the current wall-clock
+    10-min slot.  Each frame's labelled timestamp is up to ~10 min ahead
+    of its real data time, which is invisible in the RainViewer-style
+    animation but means the current slot is always populated.  ``Last-
+    Modified`` is still consulted (and clamped via ``publish_lag_sec``)
+    so a stale server response doesn't get labelled as fresh.
+
+    ``now_unix`` is the current UTC unix time; defaults to ``time.time()``.
+    Exposed as a parameter so tests can pin behaviour deterministically.
     """
-    latest = ((last_modified_unix - publish_lag_sec) // _CADENCE_SEC) * _CADENCE_SEC
+    now = int(time.time()) if now_unix is None else int(now_unix)
+    # The latest *real* slot is floor((LM − lag) / cadence).  If wall
+    # clock is ahead of that, prefer the wall-clock slot (the relabel
+    # case).  If LM is in the future relative to us (rare clock skew),
+    # don't lie about freshness — anchor on LM.
+    real_latest = ((last_modified_unix - publish_lag_sec) // _CADENCE_SEC) * _CADENCE_SEC
+    wall_slot = (now // _CADENCE_SEC) * _CADENCE_SEC
+    latest = max(real_latest, wall_slot)
     return [latest - (_MMD_EXPECTED_FRAMES - 1 - i) * _CADENCE_SEC
             for i in range(_MMD_EXPECTED_FRAMES)]
 

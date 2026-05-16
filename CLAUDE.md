@@ -36,7 +36,8 @@ src/librewxr/
     models.py        # Pydantic response models
   data/
     regions.py       # RegionDef definitions and projection params
-    sources.py       # Radar source classes (MRMS, IEM, MSC Canada, MARN, OPERA, CWA, MSS)
+    sources.py       # Radar source classes (MRMS, IEM, MSC Canada, MARN, OPERA, CWA)
+    mmd_source.py    # MET Malaysia radar source (split out of sources.py)
     fetcher.py       # Multi-source fetch orchestrator
     store.py         # FrameStore (RadarFrame ring buffer)
     coverage.py      # Radar station coverage masks
@@ -74,7 +75,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 
 ## Architecture Notes
 
-- **Multi-region:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA), Taiwan (TWCOMP), SE Asia (SEACOMP)
+- **Multi-region:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA), Taiwan (TWCOMP), SE Asia (MYPENINSULAR, MYEAST)
 - **Region groups:** CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, SOUTHEAST_ASIA, TAIWAN, ALL (configured via `LIBREWXR_ENABLED_REGIONS`)
 - **NA source:** 3-way `LIBREWXR_NA_SOURCE` setting — `mrms_fallback` (default: MRMS + IEM/MSC fallback), `mrms` (MRMS only), `iem` (legacy IEM + MSC)
 - **Source dispatch:** `RadarFetcher` routes each region group to the correct source class
@@ -89,7 +90,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **MRMS:** Region-aware — separate `MRMSSource` per product path (CONUS, ALASKA, HAWAII, CARIB, GUAM); directory listing with bisect for archive lookups; gzip retry + eccodes stderr suppression
 - **MARN/SNET (El Salvador):** Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from anonymous GCS bucket `radar-images-sv`; 5-min cadence; filename embeds local time (UTC-6, no DST); decoder maps HSV-style continuous hue gradient (green→cyan→blue→magenta) to dBZ; bucket archive depth ~24 h; MARN license requires citation
 - **CWA (Taiwan):** 7-radar QPESUMS composite (`O-A0059-001` / 雷達合成回波) from anonymous AWS S3 bucket `cwaopendata` in `ap-northeast-1`; 10-min cadence; archive key uses UTC+8 timestamp with no separator dot (`{YYYYMMDDHHMM}compref_mosaic.xml`); XML format with raw dBZ as comma-separated scientific-notation floats; data is row-major south-to-north → vertical flip on decode; sentinels `-99`/`-999`; OGDL v1.0 license, attribution required
-- **MSS (Singapore):** Single S-band radar at Changi, 480 km super-regional rain area product (`dpsri_480km`) from anonymous HTTPS at `weather.gov.sg`; 30-min cadence (clock-aligned UTC); 480x480 RGBA PNG decoded via 31-stop palette → dBZ lookup (cyan→green→yellow→red→magenta, treating dBR ≈ dBZ for the visualisation layer); covers Strait of Malacca / Peninsular Malaysia / Singapore / Sumatra / W. Borneo; the historical `cdn.neaaws.com` CDN documented in older references no longer resolves (verified 2026-05-15) — origin is the only host; Singapore Open Data Licence v1.0 attribution required
+- **MMD (MET Malaysia):** 12-radar national composite covering Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra via anonymous HTTPS at `api.met.gov.my`; 10-min native cadence; one animated GIF per fetch (1352×570, 6 frames, ~60 min of backfill); 18-stop palette → dBZ Marshall-Palmer table; combined GIF split into MYPENINSULAR + MYEAST sub-rects (peer regions, one fetch shared between them); per-frame timestamps anchored at the current wall-clock 10-min slot because MET publishes each slot ~11 min after its real data time (anchoring on real time leaves the "current" slot perpetually empty); post-decode morphological close fills hairline gaps left by burned-in state-boundary lines; CC-BY-4.0 attribution required; lives in `data/mmd_source.py` (first radar source split out of `sources.py`)
 
 ## Adding a New Region
 

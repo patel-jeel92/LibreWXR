@@ -133,40 +133,12 @@ REGIONS: dict[str, RegionDef] = {
         pixel_size=0.0125, group="TAIWAN",
         grid_width=921, grid_height=881,
     ),
-    # Singapore MSS 50 km radar — single S-band radar at MSS Changi
-    # (1.3521°N, 103.8198°E) publishing the high-resolution rectangular
-    # rain-area product (217×120 RGBA PNG) on a 5-min cadence via
-    # anonymous HTTPS at weather.gov.sg.  Despite the marketing name
-    # "50km", the file path uses ``dpsri_70km_...`` (70 km radial
-    # range, cropped to a horizontal-leaning display rectangle ≈
-    # 108×60 km centred on Changi).  Bounds derived from the display
-    # dimensions assuming ~0.5 km/px and centre-on-Changi — no
-    # projection params are published.  Filenames embed Singapore
-    # local time (UTC+8, no DST), matching the MET Malaysia and CWA
-    # Taiwan convention.
-    #
-    # This region replaced the older SEACOMP 480 km super-regional
-    # product when MET Malaysia coverage landed — MET Malaysia covers
-    # all of Peninsular Malaysia + Borneo + Brunei + N. Sumatra at
-    # higher resolution, so the 480 km overlap with MSS was redundant
-    # and the 30-min native cadence was a poor fit for our 10-min
-    # store cadence.  The 50 km product gives the cleanest Singapore-
-    # specific detail with no interpolation required (5-min native
-    # cadence aligns with every 10-min boundary).
-    "SGCOMP": RegionDef(
-        name="SGCOMP",
-        west=103.33, east=104.31, south=1.08, north=1.62,
-        pixel_size=0.00452,                # ~0.50 km/px (lon)
-        pixel_size_y=0.0045,               # ~0.50 km/px (lat)
-        group="SOUTHEAST_ASIA",
-        grid_width=217, grid_height=120,
-    ),
-    # MET Malaysia (Jabatan Meteorologi Malaysia) composite — peer source
-    # to MSS Singapore, covering Peninsular Malaysia + N. Sumatra
-    # (MYPENINSULAR) and East Malaysia / Borneo + Brunei (MYEAST).  Both
-    # regions are sub-rectangles of a single 1352x570 animated GIF served
-    # under CC-BY-4.0 from ``api.met.gov.my/static/images/radar-latest.gif``
-    # (6 frames at 10-min cadence, ~60 min of backfill per fetch).
+    # MET Malaysia (Jabatan Meteorologi Malaysia) composite covering
+    # Peninsular Malaysia + N. Sumatra (MYPENINSULAR) and East Malaysia
+    # / Borneo + Brunei (MYEAST).  Both regions are sub-rectangles of a
+    # single 1352x570 animated GIF served under CC-BY-4.0 from
+    # ``api.met.gov.my/static/images/radar-latest.gif`` (6 frames at
+    # 10-min cadence, ~60 min of backfill per fetch).
     #
     # The combined GIF renders both coverage zones in a shared
     # equirectangular grid over the union bounding box, with a vertical
@@ -178,8 +150,14 @@ REGIONS: dict[str, RegionDef] = {
     # MYCOMP72/0_products.json) which mirrors the same MET Malaysia
     # products.  The internal Rainbow 5 / LEONARDO processing software's
     # native Albers Equal Area projection is treated as equirect for
-    # serving purposes — same simplification RainViewer makes and the
-    # same approach used for MSS Singapore and MARN El Salvador.
+    # serving purposes — same simplification RainViewer makes for the
+    # other regional sources (e.g. MARN El Salvador).
+    #
+    # The Singapore MSS coverage that briefly lived in this group (2026-
+    # 05-15 → 2026-05-16) was removed because MET Malaysia's KLIA radar
+    # already covers the same area through MYPENINSULAR, and overlapping
+    # the higher-resolution MSS box on top produced a visible seam at
+    # the SGCOMP rectangle edges with no clean composite path.
     "MYPENINSULAR": RegionDef(
         name="MYPENINSULAR",
         west=96.92, east=106.28, south=-1.33, north=8.97,
@@ -206,7 +184,7 @@ REGION_GROUPS: dict[str, list[str]] = {
     "CENTRAL_AMERICA": ["SVCOMP"],
     "CONUS": ["USCOMP"],
     "EUROPE": ["OPERA"],
-    "SOUTHEAST_ASIA": ["SGCOMP", "MYPENINSULAR", "MYEAST"],
+    "SOUTHEAST_ASIA": ["MYPENINSULAR", "MYEAST"],
     "TAIWAN": ["TWCOMP"],
     "US": ["USCOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"],
 }

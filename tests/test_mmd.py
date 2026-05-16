@@ -16,6 +16,7 @@ from librewxr.data.mmd_source import (
     _decode_mmd_frame,
     _decode_mmd_palette,
     _extract_region,
+    _fill_boundary_gaps,
     _frame_timestamps,
     _MMD_EXPECTED_FRAMES,
     _MMD_EXPECTED_HEIGHT,
@@ -77,12 +78,11 @@ class TestMalaysiaRegions:
             assert r.pixel_size_y != 0.0
             assert r.pixel_size_y != r.pixel_size
 
-    def test_southeast_asia_group_includes_malaysia(self):
-        # Group alias must pull in all three SE Asia regions.
+    def test_southeast_asia_group_is_just_malaysia(self):
+        # MET Malaysia is the sole source in this group after the MSS
+        # Singapore removal.
         names = resolve_regions("SOUTHEAST_ASIA")
-        assert "SGCOMP" in names
-        assert "MYPENINSULAR" in names
-        assert "MYEAST" in names
+        assert names == ["MYPENINSULAR", "MYEAST"]
 
     def test_all_includes_malaysia(self):
         names = resolve_regions("ALL")
@@ -211,6 +211,57 @@ class TestExtractRegion:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Boundary-line gap fill
+# ─────────────────────────────────────────────────────────────────────
+class TestFillBoundaryGaps:
+    """Burned-in state borders in the upstream GIF decode as no-data
+    pixels.  Where a border crosses precipitation, this leaves a thin
+    zero-stripe that the gap-fill is supposed to bridge."""
+
+    def test_thin_line_through_precip_is_bridged(self):
+        # 20×20 field of mid-intensity precip with a 1-px wide vertical
+        # zero-stripe down the middle (simulating a state border line).
+        grid = np.full((20, 20), 100, dtype=np.uint8)
+        grid[:, 10] = 0
+        filled = _fill_boundary_gaps(grid)
+        # The stripe should be filled to roughly the surrounding value.
+        assert (filled[:, 10] > 0).all()
+        # Surrounding precipitation untouched.
+        assert (filled[:, :10] == 100).all()
+        assert (filled[:, 11:] == 100).all()
+
+    def test_large_no_precip_area_untouched(self):
+        # A 20×20 zero field with a small precip blob in one corner.
+        # The close cannot bridge the large no-data area, so nothing
+        # outside the blob's immediate neighbourhood should fill.
+        grid = np.zeros((20, 20), dtype=np.uint8)
+        grid[0:3, 0:3] = 80
+        filled = _fill_boundary_gaps(grid)
+        # Far-corner pixels stay zero — we don't want false rain.
+        assert filled[19, 19] == 0
+        assert filled[15, 15] == 0
+        # Original blob preserved.
+        assert (filled[0:3, 0:3] == 80).all()
+
+    def test_no_precip_at_all_is_passthrough(self):
+        grid = np.zeros((10, 10), dtype=np.uint8)
+        filled = _fill_boundary_gaps(grid)
+        assert (filled == 0).all()
+        # And no exception when there are no gap pixels to fill.
+
+    def test_isolated_precip_pixel_untouched(self):
+        # A single precip pixel surrounded by zeros has no thin-gap
+        # topology to bridge — should pass through unchanged.
+        grid = np.zeros((10, 10), dtype=np.uint8)
+        grid[5, 5] = 120
+        filled = _fill_boundary_gaps(grid)
+        assert filled[5, 5] == 120
+        # Neighbouring zeros stay zero — close can't fill a 1-px blob's
+        # holes because there are no holes.
+        assert filled[0, 0] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Last-Modified parsing
 # ─────────────────────────────────────────────────────────────────────
 class TestLastModified:
@@ -234,40 +285,59 @@ class TestLastModified:
 # Frame timestamp derivation
 # ─────────────────────────────────────────────────────────────────────
 class TestFrameTimestamps:
-    """The GIF lands at the endpoint ~10-15 min after the newest frame's
-    data time.  Last-Modified minus the configured lag, snapped to the
-    10-min grid, gives the newest frame's timestamp; the other 5 frames
-    follow at 10-min decrements in oldest-first order."""
+    """Timestamps are labelled at the current wall-clock 10-min slot,
+    not MET's real publish time.  MET publishes each slot ~11 min late,
+    so anchoring on the real time would leave the renderer's current
+    slot permanently empty.  Last-Modified is still consulted as a
+    ceiling so a clearly-stale response doesn't get labelled as fresh."""
 
     def _utc(self, *args):
         return int(datetime(*args, tzinfo=timezone.utc).timestamp())
 
     def test_six_frames_returned(self):
         lm = self._utc(2026, 5, 16, 6, 21, 5)
-        ts = _frame_timestamps(lm, 600)
+        ts = _frame_timestamps(lm, 600, now_unix=lm)
         assert len(ts) == _MMD_EXPECTED_FRAMES
 
     def test_oldest_first_in_strict_10min_steps(self):
         lm = self._utc(2026, 5, 16, 6, 21, 5)
-        ts = _frame_timestamps(lm, 600)
+        ts = _frame_timestamps(lm, 600, now_unix=lm)
         diffs = np.diff(ts)
         assert all(d == 600 for d in diffs)
 
-    def test_matches_burned_in_timestamp_on_observed_sample(self):
-        # Real-world sample: Last-Modified 2026-05-16 06:21:05 UTC, the
-        # GIF's burned-in newest frame read 14:10 MYT (= 06:10 UTC).
-        # With the default 600 s lag, our anchor must hit 06:10 exactly.
+    def test_wall_clock_anchor_labels_newest_at_current_slot(self):
+        # Production behaviour: at wall-clock 09:03 with a stale LM
+        # from 09:01 (MET hasn't published 09:00 yet), the newest frame
+        # gets labelled at 09:00 — the current wall-clock slot.
+        now = self._utc(2026, 5, 16, 9, 3, 0)
+        lm = self._utc(2026, 5, 16, 9, 1, 0)
+        ts = _frame_timestamps(lm, 600, now_unix=now)
+        assert ts[-1] == self._utc(2026, 5, 16, 9, 0, 0)
+        assert ts[0] == self._utc(2026, 5, 16, 8, 10, 0)
+
+    def test_stale_lm_does_not_label_as_fresh(self):
+        # If LM is hours behind wall clock (which would happen with no
+        # wall-clock shift), we'd anchor on it.  With wall-clock shift,
+        # we relabel forward so the newest frame is always at "now".
+        now = self._utc(2026, 5, 16, 12, 5, 0)
         lm = self._utc(2026, 5, 16, 6, 21, 5)
-        ts = _frame_timestamps(lm, 600)
-        newest = self._utc(2026, 5, 16, 6, 10, 0)
-        oldest = self._utc(2026, 5, 16, 5, 20, 0)
-        assert ts[-1] == newest
-        assert ts[0] == oldest
+        ts = _frame_timestamps(lm, 600, now_unix=now)
+        assert ts[-1] == self._utc(2026, 5, 16, 12, 0, 0)
+
+    def test_future_lm_does_not_lie_about_freshness(self):
+        # Reverse skew: if LM is from the future (client clock behind
+        # server), trust LM rather than the wall-clock floor — otherwise
+        # we'd label a fresh server response as older than it is.
+        now = self._utc(2026, 5, 16, 9, 0, 0)
+        lm = self._utc(2026, 5, 16, 9, 35, 0)
+        ts = _frame_timestamps(lm, 0, now_unix=now)
+        assert ts[-1] == self._utc(2026, 5, 16, 9, 30, 0)
 
     def test_publish_lag_zero_anchors_to_grid_floor(self):
-        # With zero lag, newest frame ts is just floor(LM, 10min).
+        # With zero lag and LM == now, newest frame ts is just
+        # floor(LM, 10min).
         lm = self._utc(2026, 5, 16, 6, 25, 30)
-        ts = _frame_timestamps(lm, 0)
+        ts = _frame_timestamps(lm, 0, now_unix=lm)
         assert ts[-1] == self._utc(2026, 5, 16, 6, 20, 0)
 
 

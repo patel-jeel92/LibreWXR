@@ -45,14 +45,6 @@ REGION_RADAR_RANGE: dict[str, float] = {
     # (negligible visual impact) and avoids any IFS bleed inside
     # the radar's real coverage.
     "TWCOMP": 550.0,
-    # MSS Singapore Changi radar 50 km product — actual upstream
-    # filename uses "dpsri_70km", so 70 km is the radial range.  The
-    # 480 km super-regional version was retired when MET Malaysia
-    # coverage landed: MET Malaysia already covers Peninsular
-    # Malaysia and Borneo, and the 30-min cadence on the 480 km
-    # version animated poorly.  70 km gives clean Singapore-specific
-    # detail with no interpolation needed (5-min native cadence).
-    "SGCOMP": 70.0,
 }
 
 # NEXRAD WSR-88D stations covering USCOMP (continental US).
@@ -532,14 +524,6 @@ SNET_STATIONS: list[tuple[float, float]] = [
     (13.687, -88.883),   # San Andrés
 ]
 
-# MSS Singapore — single S-band radar at MSS Changi.  Coordinates are
-# the published siting of the operational radar; the 50 km display
-# product is centred on this point with a 70 km effective radial
-# range.  Range override above applies to the SGCOMP mask.
-MSS_STATIONS: list[tuple[float, float]] = [
-    (1.3521, 103.8198),  # MSS Changi
-]
-
 # MET Malaysia — 12-radar national network feeding the combined
 # Peninsular + East composite GIF.  Coordinates are approximate (taken
 # from each radar's host airport / city — the operational siting is
@@ -579,7 +563,6 @@ REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
     "SVCOMP": SNET_STATIONS,
     "OPERA": OPERA_STATIONS,
     "TWCOMP": CWA_STATIONS,
-    "SGCOMP": MSS_STATIONS,
     "MYPENINSULAR": MMD_PENINSULAR_STATIONS,
     "MYEAST": MMD_EAST_STATIONS,
 }
