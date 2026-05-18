@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     coord_cache_size: int = 2048  # LRU entries per coordinate cache (lower = less RAM)
     memory_limit_mb: int = 0  # Container memory limit in MB (0 = auto-detect)
     memory_pressure_check_interval: int = 30  # Seconds between memory pressure checks
-    smooth_radius: float = 2.0  # Gaussian blur radius when smoothing is enabled
+    smooth_radius: float = 1.0  # Baseline Gaussian blur radius; renderer auto-scales it up at high zoom on coarse sources
     noise_floor_dbz: float = 10.0  # Minimum dBZ to display; lower values are zeroed out
     despeckle_min_neighbors: int = 3  # Min non-zero neighbors (of 8) to keep a pixel; 0 to disable
     webp_quality: int = 65  # WebP quality: 100 = lossless, 1-99 = lossy at that quality

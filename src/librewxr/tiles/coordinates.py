@@ -222,6 +222,34 @@ def region_pixel_indices_fractional(
     return row_grid, col_grid
 
 
+@lru_cache(maxsize=settings.coord_cache_size)
+def region_pixel_indices_fractional_padded(
+    region: RegionDef, z: int, x: int, y: int, tile_size: int = 256, pad: int = 8
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fractional pixel coords for a tile with padding (bilinear + blur path)."""
+    n = 2**z
+    cx = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
+    cy = np.arange(-pad, tile_size + pad, dtype=np.float64) + 0.5
+
+    lon = (x + cx / tile_size) / n * 360.0 - 180.0
+    lat_rad = np.arctan(np.sinh(math.pi * (1 - 2 * (y + cy / tile_size) / n)))
+    lat = np.degrees(lat_rad)
+
+    if region.proj == "laea":
+        col_grid, row_grid = _laea_pixel_coords(lon, lat, region)
+    else:
+        col_f = (lon - region.west) / region.pixel_size
+        row_f = (region.north - lat) / region._ps_y
+        col_grid, row_grid = np.meshgrid(col_f, row_f)
+
+    row_grid = np.clip(row_grid, 0, region.height - 1).astype(np.float32)
+    col_grid = np.clip(col_grid, 0, region.width - 1).astype(np.float32)
+
+    row_grid.flags.writeable = False
+    col_grid.flags.writeable = False
+    return row_grid, col_grid
+
+
 def tile_overlaps_region(region: RegionDef, z: int, x: int, y: int) -> bool:
     """Check if a tile has any overlap with a region's coverage area."""
     tw, ts, te, tn = tile_bounds(z, x, y)
@@ -373,6 +401,7 @@ def warm_coordinate_caches(
                     region_pixel_indices(region, z, x, y, tile_size)
                     region_pixel_indices_padded(region, z, x, y, tile_size, pad=8)
                     region_pixel_indices_fractional(region, z, x, y, tile_size)
+                    region_pixel_indices_fractional_padded(region, z, x, y, tile_size, pad=8)
                     warmed += 1
     return warmed
 
@@ -385,6 +414,7 @@ ALL_CACHES = [
     region_pixel_indices,
     region_pixel_indices_padded,
     region_pixel_indices_fractional,
+    region_pixel_indices_fractional_padded,
     tile_pixel_latlons,
     tile_pixel_latlons_padded,
 ]
@@ -399,6 +429,8 @@ _CACHE_ENTRY_BYTES = {
     region_pixel_indices_padded: 2 * 4 * 272 * 272,
     # region_pixel_indices_fractional: 2 × float32 × 256 × 256
     region_pixel_indices_fractional: 2 * 4 * 256 * 256,
+    # region_pixel_indices_fractional_padded: 2 × float32 × 272 × 272
+    region_pixel_indices_fractional_padded: 2 * 4 * 272 * 272,
     # tile_pixel_latlons: 2 × float32 × 256 × 256
     tile_pixel_latlons: 2 * 4 * 256 * 256,
     # tile_pixel_latlons_padded: 2 × float32 × 272 × 272

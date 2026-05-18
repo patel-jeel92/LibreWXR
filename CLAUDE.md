@@ -103,7 +103,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **Frame cadence:** 10 minutes, clock-aligned to match Rain Viewer
 - **RadarFrame.regions:** `dict[str, np.ndarray]` keyed by region name, uint8 dBZ encoding
 - **Projections:** RegionDef supports latlon, LCC (`proj="lcc"`), polar stereographic (`proj="stere"`), and LAEA
-- **Tile rendering:** On-demand with byte-capped LRU cache + background tile warmer
+- **Tile rendering:** On-demand with byte-capped LRU cache + background tile warmer; Gaussian smoothing radius auto-scales from the local Jacobian (`_compute_blur_radius` in `tiles/renderer.py`) so coarse-grid sources (OPERA LAEA, MRMS, MMD) get more blur at high zoom without over-blurring fine sources at low zoom. Radar sampling under `smooth=1` is bilinear in both padded and unpadded paths
 - **ECMWF IFS:** 9km global precipitation from Open-Meteo S3; optical flow interpolation for 10-min frames; reference_time skip avoids redundant downloads
 - **Nowcasting:** Radar extrapolation + IFS blending with spatial feathering at radar boundaries
 - **Satellite:** IFS cloud cover (high/mid/low) composited into IR-like tiles; persistent disk cache with atomic writes and model-run backfill

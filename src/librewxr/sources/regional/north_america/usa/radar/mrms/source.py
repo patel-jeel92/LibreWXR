@@ -370,12 +370,15 @@ def _resample_mrms_to_region(
 
     Steps:
     1. Extract the reflectivity variable (first data var).
-    2. Slice the MRMS grid to the region's bounding box (with 1-cell
-       padding to avoid edge effects in nearest-neighbor sampling).
-    3. Replace -999.0 (MRMS no-data) with NaN.
+    2. Slice the MRMS grid to the region's bounding box (with extra-cell
+       padding so bilinear interpolation has neighbours at the edges).
+    3. Mask -999.0 (MRMS no-data) → 0.0 dBZ so it interpolates as clear
+       sky instead of poisoning bilinear neighbours.
     4. Build target lat/lon axes from region bounds and pixel_size.
-    5. Resample via nearest-neighbor (upscale for USCOMP, downsample
-       for CACOMP) using numpy index mapping.
+    5. Resample via bilinear interpolation (upscale for USCOMP/HICOMP,
+       1:1 for AKCOMP/PRCOMP, mild downsample for GUCOMP).  Bilinear
+       removes the doubled-pixel pattern that nearest-neighbor would
+       bake into the upsampled USCOMP grid.
     6. Convert float dBZ to uint8 using the shared ``_dbz_float_to_uint8``
        encoder.
     """
@@ -389,8 +392,9 @@ def _resample_mrms_to_region(
     if lons.max() > 180:
         lons = np.where(lons > 180, lons - 360, lons).astype(lons.dtype)
 
-    # Slice to region bbox with 1-cell padding
-    pad = 2  # extra cells beyond bbox for safety
+    # Slice to region bbox with extra-cell padding (bilinear needs a
+    # neighbour on either side of the target span)
+    pad = 2
     south_idx = np.searchsorted(-lats, -region.south)  # lats are descending
     north_idx = np.searchsorted(-lats, -region.north)
     west_idx = np.searchsorted(lons, region.west)
@@ -404,6 +408,15 @@ def _resample_mrms_to_region(
     data = data[north_idx:south_idx, west_idx:east_idx]
     lats = lats[north_idx:south_idx]
     lons = lons[west_idx:east_idx]
+
+    # Track MRMS no-data (-999) explicitly: substitute 0 dBZ for the
+    # bilinear math (so adjacent valid pixels don't get pulled toward
+    # -999 at coverage edges), and carry a parallel validity mask that
+    # also gets bilinearly interpolated.  After interpolation, any
+    # target pixel whose source neighbours were mostly no-data is
+    # restored to the no-data sentinel (-33 → 0 in the encoder).
+    nodata_mask = (data < -900).astype(np.float32)
+    data = np.where(data < -900, 0.0, data).astype(np.float32)
 
     # Build target grid axes.
     # Target lats go north-to-south (descending) so that row 0 of the
@@ -422,22 +435,49 @@ def _resample_mrms_to_region(
         logger.warning("MRMS resample: empty target grid for %s", region.name)
         return np.zeros((region.height, region.width), dtype=np.uint8)
 
-    # Nearest-neighbor resampling: map each target pixel to the closest
-    # source pixel.  Both source and target lats are north-to-south
-    # (descending), so negating gives ascending arrays suitable for
-    # searchsorted.
-    target_lat_rows = np.searchsorted(-lats, -target_lats)
-    target_lat_rows = np.clip(target_lat_rows, 0, len(lats) - 1)
+    # Source grid is uniform (after crop): derive float row/col indices
+    # for each target pixel by linear inversion of the grid axes.
+    src_lat0 = float(lats[0])
+    src_lon0 = float(lons[0])
+    src_lat_step = float(lats[1] - lats[0])  # negative (descending lats)
+    src_lon_step = float(lons[1] - lons[0])  # positive
 
-    target_lon_cols = np.searchsorted(lons, target_lons)
-    target_lon_cols = np.clip(target_lon_cols, 0, len(lons) - 1)
+    rows_f = (target_lats - src_lat0) / src_lat_step
+    cols_f = (target_lons - src_lon0) / src_lon_step
 
-    # Index into the cropped data array
-    resampled = data[target_lat_rows[:, None], target_lon_cols[None, :]]
+    r0 = np.clip(np.floor(rows_f).astype(np.int32), 0, data.shape[0] - 1)
+    c0 = np.clip(np.floor(cols_f).astype(np.int32), 0, data.shape[1] - 1)
+    r1 = np.minimum(r0 + 1, data.shape[0] - 1)
+    c1 = np.minimum(c0 + 1, data.shape[1] - 1)
 
-    # Replace MRMS no-data (-999.0) with NaN before encoding
-    resampled = np.where(resampled < -900, np.nan, resampled)
+    dr = (rows_f - r0).astype(np.float32)[:, None]
+    dc = (cols_f - c0).astype(np.float32)[None, :]
 
-    # Convert to uint8 using shared encoder (NaN → -33 → 0)
-    resampled = np.where(np.isnan(resampled), -33.0, resampled)
+    rr0 = r0[:, None]
+    rr1 = r1[:, None]
+    cc0 = c0[None, :]
+    cc1 = c1[None, :]
+    w00 = (1 - dr) * (1 - dc)
+    w01 = (1 - dr) * dc
+    w10 = dr * (1 - dc)
+    w11 = dr * dc
+
+    resampled = (
+        data[rr0, cc0] * w00
+        + data[rr0, cc1] * w01
+        + data[rr1, cc0] * w10
+        + data[rr1, cc1] * w11
+    )
+
+    # Bilinearly interpolate the no-data mask too.  Target pixels whose
+    # source neighbourhood was majority no-data get restored to the
+    # no-data sentinel; the encoder maps that to 0 (transparent).
+    nodata_interp = (
+        nodata_mask[rr0, cc0] * w00
+        + nodata_mask[rr0, cc1] * w01
+        + nodata_mask[rr1, cc0] * w10
+        + nodata_mask[rr1, cc1] * w11
+    )
+    resampled = np.where(nodata_interp > 0.5, -33.0, resampled)
+
     return _dbz_float_to_uint8(resampled)

@@ -295,11 +295,11 @@ Maximum tile zoom level. Higher values allow more detail when zoomed in but use 
 
 ### `LIBREWXR_SMOOTH_RADIUS`
 
-Gaussian blur radius applied when smoothing is enabled in the tile URL (`smooth=1`). Higher values produce a softer appearance. Set to 0 to disable smoothing entirely, even when clients request it.
+Baseline Gaussian blur radius applied when smoothing is enabled in the tile URL (`smooth=1`). The renderer auto-scales this up at high zoom on coarse sources (OPERA's 2 km LAEA grid, MRMS, MMD, etc.) by measuring how many tile pixels each region pixel covers — so this value is the floor for fine sources at low zoom, not the cap. Set to 0 to disable smoothing entirely, even when clients request it.
 
 | | |
 |---|---|
-| **Default** | `2.0` |
+| **Default** | `1.0` |
 | **Type** | float |
 
 **Recommended range:** 2.0 - 4.0. Rain Viewer used approximately 3.0.
