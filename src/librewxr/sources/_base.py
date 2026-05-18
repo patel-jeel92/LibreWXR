@@ -65,13 +65,20 @@ class RadarSourceContribution:
 
     A single contribution may cover multiple regions (e.g. MMD's one
     instance serves both MYPENINSULAR and MYEAST from one HTTP fetch).
+
+    ``station_map`` is keyed by region name and feeds the coverage-mask
+    builder in ``data/coverage.py``.  Regions without a station list get
+    no mask (full-region coverage is assumed).  ``range_overrides``
+    likewise feeds the mask builder — any region missing here uses the
+    240 km default Doppler reach.
     """
 
     regions: list[RegionDef]
     instance: RadarSource
     group: str
     preempts: tuple[str, ...] = ()
-    stations: list[tuple[float, float]] = field(default_factory=list)
+    station_map: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    range_overrides: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

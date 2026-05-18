@@ -39,7 +39,7 @@ Citation block lives in the top-level `README.md` and `docs/coverage.md`.
 
 ## Stations
 
-Single station — San Andrés volcano at (13.687, -88.883).  Coverage-mask
-consumption is still via `librewxr.data.radar_stations` (Phase 1 of the
-sources refactor — Phase 2 switches it over).  Range override is 120 km
-because this is the 120 km product, not the 240 km network default.
+Single station — San Andrés volcano at (13.687, -88.883).  Coordinates
+and the 120 km range override live in `stations.py` and feed
+`data/coverage.py` via the `RadarSourceContribution`.  The override
+matches the 120 km product (not the 240 km network default).

@@ -28,7 +28,7 @@ from .source import (
     _MSC_CANADA_MAX_RGB_DIST,
     _MSC_CANADA_PALETTE,
 )
-from .stations import STATIONS
+from .stations import STATION_MAP, STATIONS
 
 REGION_GROUP = "CANADA"
 
@@ -38,6 +38,7 @@ __all__ = [
     "REGIONS",
     "REGION_GROUP",
     "STATIONS",
+    "STATION_MAP",
     "_MSC_CANADA_MAX_RGB_DIST",
     "_MSC_CANADA_PALETTE",
     "_decode_msc_canada_png",
@@ -61,5 +62,5 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         regions=list(REGIONS),
         instance=instance,
         group=REGION_GROUP,
-        stations=list(STATIONS),
+        station_map={k: list(v) for k, v in STATION_MAP.items()},
     )

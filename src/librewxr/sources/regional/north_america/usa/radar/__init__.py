@@ -17,8 +17,7 @@ from .stations import (
     NEXRAD_GUAM,
     NEXRAD_HAWAII,
     NEXRAD_PUERTO_RICO,
-    REGION_STATIONS,
-    STATIONS,
+    STATION_MAP,
 )
 
 REGION_GROUP = "US"
@@ -35,7 +34,6 @@ __all__ = [
     "PRCOMP",
     "REGIONS",
     "REGION_GROUP",
-    "REGION_STATIONS",
-    "STATIONS",
+    "STATION_MAP",
     "USCOMP",
 ]

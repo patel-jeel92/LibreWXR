@@ -17,7 +17,7 @@ from __future__ import annotations
 from librewxr.sources._base import RadarSourceContribution
 
 from ..regions import REGIONS as USA_REGIONS
-from ..stations import STATIONS as USA_STATIONS
+from ..stations import STATION_MAP as USA_STATION_MAP
 from .source import IEMSource, _parse_n0q_png
 
 __all__ = [
@@ -42,5 +42,5 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         regions=list(USA_REGIONS),
         instance=instance,
         group="US",
-        stations=list(USA_STATIONS),
+        station_map={k: list(v) for k, v in USA_STATION_MAP.items()},
     )

@@ -47,8 +47,7 @@ block in the top-level `README.md` and `docs/coverage.md`.
 ## Stations
 
 ~155 operational European radars from the EUMETNET OPERA database.  The
-full list lives in `stations.py`; regenerate by downloading
-`Data/OPERA_RADARS_DB_<date>.json` from the OPERA Database page and
-filtering on `status="1"`.  Coverage-mask consumption is still via
-`librewxr.data.radar_stations` (Phase 1 of the sources refactor —
-Phase 2 switches it over).
+full list lives in `stations.py` together with the 300 km C-band range
+override; both feed `data/coverage.py` via the `RadarSourceContribution`.
+Regenerate by downloading `Data/OPERA_RADARS_DB_<date>.json` from the
+OPERA Database page and filtering on `status="1"`.

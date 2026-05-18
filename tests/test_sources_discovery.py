@@ -64,7 +64,8 @@ def test_protocols_and_contribution_dataclasses_importable():
     radar = RadarSourceContribution(regions=[], instance=None, group="X")  # type: ignore[arg-type]
     assert radar.regions == []
     assert radar.preempts == ()
-    assert radar.stations == []
+    assert radar.station_map == {}
+    assert radar.range_overrides == {}
 
     nwp = NWPContribution(instance=None, priority=10, name="X")  # type: ignore[arg-type]
     assert nwp.priority == 10

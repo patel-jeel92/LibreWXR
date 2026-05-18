@@ -11,10 +11,11 @@ suppression across the entire LAEA grid bbox.  Regenerate this list by
 downloading ``Data/OPERA_RADARS_DB_<date>.json`` from the OPERA Database
 page and filtering on ``status="1"``.
 
-Note (2026-05-17): Coverage-mask generation still reads from
-``librewxr.data.radar_stations`` for now.  Phase 2 of the sources
-refactor migrates that consumer over to per-source ``stations.py``
-files like this one.
+Range override: European C-band radars in the OPERA network detect
+precipitation out to ~300 km — using the 240 km default leaves gaps
+around peripheral stations (Iceland, Ireland) where OPERA still has
+data but the coverage mask says "not covered," causing visible
+ECMWF/OPERA overlap seams.
 """
 from __future__ import annotations
 
@@ -232,3 +233,11 @@ STATIONS: list[tuple[float, float]] = [
     (50.0034, -5.2230),   # ukpre Predannack
     (51.2948, 0.6043),    # ukthu Thurnham
 ]
+
+STATION_MAP: dict[str, list[tuple[float, float]]] = {
+    "OPERA": STATIONS,
+}
+
+RANGE_OVERRIDES: dict[str, float] = {
+    "OPERA": 300.0,
+}

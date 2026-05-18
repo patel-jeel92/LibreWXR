@@ -29,8 +29,8 @@ from librewxr.data.icon_eu_grid import ICONEUGrid
 from librewxr.data.master_state import apply_state, load_state, state_mtime
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
-from librewxr.data.radar_stations import MRMS_STATIONS
 from librewxr.data.store import FrameStore
+from librewxr.sources import collect_radar_coverage_metadata
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
@@ -227,10 +227,8 @@ async def _render_only_lifespan(app: FastAPI):
     alerts_store = stores["alerts_store"]
 
     enabled = settings.get_enabled_regions()
-    coverage_overrides = (
-        MRMS_STATIONS if settings.na_source in ("mrms", "mrms_fallback") else None
-    )
-    build_coverage_masks(station_overrides=coverage_overrides)
+    station_map, range_overrides = collect_radar_coverage_metadata(settings)
+    build_coverage_masks(station_map, range_overrides=range_overrides)
     build_feather_masks()
 
     chain_sources = []
@@ -439,14 +437,12 @@ async def lifespan(app: FastAPI):
 
     # Precompute radar station coverage masks used by the ECMWF fallback
     # to distinguish "outside radar range" from "clear sky within range".
-    # When MRMS is the NA source, use combined NEXRAD+Canada stations since
-    # MRMS ingests both networks — this gives correct coverage for USCOMP
-    # and CACOMP.  When IEM is the source, use the default per-region
-    # stations (NEXRAD-only for USCOMP, Canada-only for CACOMP).
-    coverage_overrides = None
-    if settings.na_source in ("mrms", "mrms_fallback"):
-        coverage_overrides = MRMS_STATIONS
-    build_coverage_masks(station_overrides=coverage_overrides)
+    # Each radar provider contributes its own per-region station list +
+    # range override; the registry walk merges them based on the active
+    # settings (e.g. NA source = MRMS pulls in NEXRAD + Canadian; NA
+    # source = IEM pulls NEXRAD only).
+    station_map, range_overrides = collect_radar_coverage_metadata(settings)
+    build_coverage_masks(station_map, range_overrides=range_overrides)
     build_feather_masks()
 
     # Nowcast store and generator

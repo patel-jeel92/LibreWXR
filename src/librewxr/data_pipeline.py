@@ -45,10 +45,10 @@ from librewxr.data.master_state import dump_state
 from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.radar_cache import RadarFrameCache
-from librewxr.data.radar_stations import MRMS_STATIONS
 from librewxr.data.regions import REGIONS
 from librewxr.data.store import FrameStore
 from librewxr.data.wrf_smn_grid import WRFSMNGrid
+from librewxr.sources import collect_radar_coverage_metadata
 from librewxr.tiles.cache import TileCache
 
 # The pipeline writes no tiles itself, but RadarFetcher invalidates a
@@ -165,10 +165,8 @@ async def run_pipeline() -> None:
 
     cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
 
-    coverage_overrides = (
-        MRMS_STATIONS if settings.na_source in ("mrms", "mrms_fallback") else None
-    )
-    build_coverage_masks(station_overrides=coverage_overrides)
+    station_map, range_overrides = collect_radar_coverage_metadata(settings)
+    build_coverage_masks(station_map, range_overrides=range_overrides)
     build_feather_masks()
 
     nowcast_store = None

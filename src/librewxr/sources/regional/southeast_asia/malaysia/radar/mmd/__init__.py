@@ -19,18 +19,21 @@ from librewxr.sources._base import RadarSourceContribution
 
 from .regions import MYEAST, MYPENINSULAR, REGIONS
 from .source import MMDSource
-from .stations import STATIONS
+from .stations import EAST_STATIONS, PENINSULAR_STATIONS, RANGE_OVERRIDES, STATION_MAP
 
 # Discovery hooks — see librewxr.data.regions._merge_discovered_regions.
 REGION_GROUP = "SOUTHEAST_ASIA"
 
 __all__ = [
+    "EAST_STATIONS",
     "MYEAST",
     "MYPENINSULAR",
     "MMDSource",
+    "PENINSULAR_STATIONS",
+    "RANGE_OVERRIDES",
     "REGIONS",
     "REGION_GROUP",
-    "STATIONS",
+    "STATION_MAP",
     "radar_provider",
 ]
 
@@ -54,5 +57,6 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         regions=list(REGIONS),
         instance=instance,
         group=REGION_GROUP,
-        stations=list(STATIONS),
+        station_map={k: list(v) for k, v in STATION_MAP.items()},
+        range_overrides=dict(RANGE_OVERRIDES),
     )

@@ -69,5 +69,4 @@ is a courtesy — see the top-level `README.md` and `docs/coverage.md`.
 Per-region station map in `stations.py`.  USCOMP/CACOMP combine the
 NEXRAD CONUS list with the ECCC Canadian network (MRMS ingests both
 into the CONUS product); AKCOMP/HICOMP/PRCOMP/GUCOMP are NEXRAD-only.
-Coverage-mask consumption is still via `librewxr.data.radar_stations`
-(Phase 1 — Phase 2 switches it over).
+Feeds `data/coverage.py` via the `RadarSourceContribution`.

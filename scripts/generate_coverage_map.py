@@ -51,21 +51,44 @@ BASEMAP_PATH = Path("/tmp/ne_countries.geojson")
 # Pull radar station lists from the project source so adding a new
 # station updates the map without a second edit.
 sys.path.insert(0, str(REPO_ROOT / "src"))
-from librewxr.data.radar_stations import (  # noqa: E402
-    NEXRAD_CONUS,
+from librewxr.data.coverage import DEFAULT_RADAR_RANGE_KM as RADAR_RANGE_KM  # noqa: E402
+from librewxr.sources.regional.central_america.el_salvador.radar.marn.stations import (  # noqa: E402
+    RANGE_OVERRIDES as MARN_RANGES,
+    STATIONS as SNET_STATIONS,
+)
+from librewxr.sources.regional.east_asia.taiwan.radar.cwa.stations import (  # noqa: E402
+    RANGE_OVERRIDES as CWA_RANGES,
+    STATIONS as CWA_STATIONS,
+)
+from librewxr.sources.regional.europe.radar.opera.stations import (  # noqa: E402
+    RANGE_OVERRIDES as OPERA_RANGES,
+    STATIONS as OPERA_STATIONS,
+)
+from librewxr.sources.regional.north_america.canada.radar.msc_canada.stations import (  # noqa: E402
+    STATIONS as CANADA_STATIONS,
+)
+from librewxr.sources.regional.north_america.usa.radar.stations import (  # noqa: E402
     NEXRAD_ALASKA,
+    NEXRAD_CONUS,
+    NEXRAD_GUAM,
     NEXRAD_HAWAII,
     NEXRAD_PUERTO_RICO,
-    NEXRAD_GUAM,
-    CANADA_STATIONS,
-    CWA_STATIONS,
-    MMD_PENINSULAR_STATIONS,
-    MMD_EAST_STATIONS,
-    SNET_STATIONS,
-    OPERA_STATIONS,
-    RADAR_RANGE_KM,
-    REGION_RADAR_RANGE,
 )
+from librewxr.sources.regional.southeast_asia.malaysia.radar.mmd.stations import (  # noqa: E402
+    EAST_STATIONS as MMD_EAST_STATIONS,
+    PENINSULAR_STATIONS as MMD_PENINSULAR_STATIONS,
+    RANGE_OVERRIDES as MMD_RANGES,
+)
+
+# Combined per-region range map for the map renderer.  Mirrors what
+# ``data.coverage`` builds at runtime — provider-supplied range overrides
+# fall back to ``RADAR_RANGE_KM`` (240 km Doppler) for anything else.
+REGION_RADAR_RANGE: dict[str, float] = {
+    **MARN_RANGES,
+    **CWA_RANGES,
+    **OPERA_RANGES,
+    **MMD_RANGES,
+}
 
 
 # ── Coverage source definitions ────────────────────────────────────────
@@ -238,12 +261,13 @@ def rotated_pole_polygon(
 def build_radar_sources() -> list[Source]:
     """Build per-station union-of-circles polygons for every radar source.
 
-    Reads the station lists straight from
-    ``librewxr.data.radar_stations`` so adding or removing a station
-    propagates through to the map automatically.  Range is
-    ``RADAR_RANGE_KM`` (240 km) by default, overridden per-region via
-    ``REGION_RADAR_RANGE`` (300 km for OPERA's C-band network) — same
-    numbers the runtime coverage mask uses.
+    Reads the station lists straight from each
+    ``librewxr.sources.regional.../radar/<source>/stations.py`` so adding
+    or removing a station propagates through to the map automatically.
+    Range is ``RADAR_RANGE_KM`` (240 km) by default, overridden per-region
+    via each source's ``RANGE_OVERRIDES`` (300 km for OPERA's C-band
+    network, 120 km for the SNET overlay, 450 km for the CWA typhoon
+    extent) — same numbers the runtime coverage mask uses.
     """
     radar: list[Source] = []
 

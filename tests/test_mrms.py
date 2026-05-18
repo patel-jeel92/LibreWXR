@@ -195,32 +195,47 @@ class TestMRMSDbzEncoding:
 
 class TestMRMSStations:
     def test_mrms_stations_is_dict(self):
-        from librewxr.data.radar_stations import MRMS_STATIONS
-        assert isinstance(MRMS_STATIONS, dict)
-        assert len(MRMS_STATIONS) == 6
-        assert "USCOMP" in MRMS_STATIONS
-        assert "CACOMP" in MRMS_STATIONS
-        assert "AKCOMP" in MRMS_STATIONS
-        assert "HICOMP" in MRMS_STATIONS
-        assert "PRCOMP" in MRMS_STATIONS
-        assert "GUCOMP" in MRMS_STATIONS
+        from librewxr.sources.regional.north_america.usa.radar.mrms.stations import (
+            STATION_MAP,
+        )
+        assert isinstance(STATION_MAP, dict)
+        assert len(STATION_MAP) == 6
+        assert "USCOMP" in STATION_MAP
+        assert "CACOMP" in STATION_MAP
+        assert "AKCOMP" in STATION_MAP
+        assert "HICOMP" in STATION_MAP
+        assert "PRCOMP" in STATION_MAP
+        assert "GUCOMP" in STATION_MAP
 
     def test_mrms_stations_uscomp_cacomp(self):
-        from librewxr.data.radar_stations import MRMS_STATIONS, NEXRAD_CONUS, CANADA_STATIONS
+        from librewxr.sources.regional.north_america.canada.radar.msc_canada.stations import (
+            STATIONS as CANADA_STATIONS,
+        )
+        from librewxr.sources.regional.north_america.usa.radar.mrms.stations import (
+            STATION_MAP,
+        )
+        from librewxr.sources.regional.north_america.usa.radar.stations import (
+            NEXRAD_CONUS,
+        )
         # USCOMP and CACOMP share the combined NEXRAD + Canada list
         combined = NEXRAD_CONUS + CANADA_STATIONS
-        assert MRMS_STATIONS["USCOMP"] == combined
-        assert MRMS_STATIONS["CACOMP"] == combined
+        assert STATION_MAP["USCOMP"] == combined
+        assert STATION_MAP["CACOMP"] == combined
 
     def test_mrms_stations_territories(self):
-        from librewxr.data.radar_stations import (
-            MRMS_STATIONS, NEXRAD_ALASKA, NEXRAD_HAWAII,
-            NEXRAD_PUERTO_RICO, NEXRAD_GUAM,
+        from librewxr.sources.regional.north_america.usa.radar.mrms.stations import (
+            STATION_MAP,
         )
-        assert MRMS_STATIONS["AKCOMP"] == NEXRAD_ALASKA
-        assert MRMS_STATIONS["HICOMP"] == NEXRAD_HAWAII
-        assert MRMS_STATIONS["PRCOMP"] == NEXRAD_PUERTO_RICO
-        assert MRMS_STATIONS["GUCOMP"] == NEXRAD_GUAM
+        from librewxr.sources.regional.north_america.usa.radar.stations import (
+            NEXRAD_ALASKA,
+            NEXRAD_GUAM,
+            NEXRAD_HAWAII,
+            NEXRAD_PUERTO_RICO,
+        )
+        assert STATION_MAP["AKCOMP"] == NEXRAD_ALASKA
+        assert STATION_MAP["HICOMP"] == NEXRAD_HAWAII
+        assert STATION_MAP["PRCOMP"] == NEXRAD_PUERTO_RICO
+        assert STATION_MAP["GUCOMP"] == NEXRAD_GUAM
 
 
 class TestMRMSDirCache:

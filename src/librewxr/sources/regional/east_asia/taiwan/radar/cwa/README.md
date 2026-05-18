@@ -41,6 +41,6 @@ citation block.
 ## Stations
 
 7-radar national network: Wufenshan, Hualien, Qigu, Kenting, Shulin,
-Nantun, Linyuan.  Coordinates live in `stations.py`; coverage-mask
-consumption is still via `librewxr.data.radar_stations` (Phase 1 of
-the sources refactor — Phase 2 switches it over).
+Nantun, Linyuan.  Coordinates and the 450 km range override live in
+`stations.py` and feed `data/coverage.py` via the
+`RadarSourceContribution`.

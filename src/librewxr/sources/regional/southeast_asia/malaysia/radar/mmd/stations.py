@@ -5,18 +5,24 @@
 12-radar national network feeding the combined Peninsular + East
 composite GIF.  Coordinates are approximate (taken from each radar's
 host airport / city — the operational siting is usually co-located or
-within a few km).  Default 240 km Doppler range.
+within a few km).
 
 Cross-checked against the station inventory on
 rainviewer.com/radars/malaysia.html (12 stations: MY2809–MY2819,
 MY2865).
 
-Note (2026-05-17): Coverage-mask generation still reads from
-``librewxr.data.radar_stations`` for now.  Phase 2 of the sources
-refactor migrates that consumer over to per-source ``stations.py``
-files like this one; until then, the provider in ``__init__.py``
-forwards these lists via ``RadarSourceContribution.stations`` for
-future wiring but the legacy table is the live source.
+Range overrides: MET Malaysia's CAPPI composite extends well past the
+240 km Doppler default — empirically measured 372 km max extent over
+Peninsular Malaysia and 332 km over East Malaysia from the nearest
+station, with p99 distances of 313 km and 302 km respectively.  The
+default would clip ~10% of legitimate radar data (visible as IFS bleed
+at frame T+0 and a "chunk of radar rain blinking out" at the first
+nowcast frame as the blend switches to model outside the mask).  Ranges
+chosen to snugly cover the measured max with small margin: a looser fit
+would help if maxes fluctuate day-to-day, but it would also hide IFS
+precipitation over the South China Sea / Celebes Sea (which, unlike
+CWA's open Pacific halo, gets real rain).  If clipping reappears on a
+heavy convective day, bump by 25 km.
 """
 from __future__ import annotations
 
@@ -39,4 +45,12 @@ EAST_STATIONS: list[tuple[float, float]] = [
     (5.90, 118.06),    # MY2811 Sandakan
 ]
 
-STATIONS: list[tuple[float, float]] = PENINSULAR_STATIONS + EAST_STATIONS
+STATION_MAP: dict[str, list[tuple[float, float]]] = {
+    "MYPENINSULAR": PENINSULAR_STATIONS,
+    "MYEAST": EAST_STATIONS,
+}
+
+RANGE_OVERRIDES: dict[str, float] = {
+    "MYPENINSULAR": 375.0,
+    "MYEAST": 350.0,
+}

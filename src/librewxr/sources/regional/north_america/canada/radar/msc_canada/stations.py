@@ -11,11 +11,6 @@ Needed because MSC's RADAR_1KM_RRAI composite covers the whole CACOMP
 bbox but only has actual data within ~240 km of these stations —
 without a mask, the ECMWF fallback is suppressed over huge empty
 regions (open Pacific, Arctic, Atlantic).
-
-Note (2026-05-17): Coverage-mask generation still reads from
-``librewxr.data.radar_stations`` for now.  Phase 2 of the sources
-refactor migrates that consumer over to per-source ``stations.py``
-files like this one.
 """
 from __future__ import annotations
 
@@ -55,3 +50,7 @@ STATIONS: list[tuple[float, float]] = [
     (48.48028, -67.60111),     # CASVD Val d'Irène, QC
     (50.15389, -97.77833),     # CASWL Woodlands, MB
 ]
+
+STATION_MAP: dict[str, list[tuple[float, float]]] = {
+    "CACOMP": STATIONS,
+}

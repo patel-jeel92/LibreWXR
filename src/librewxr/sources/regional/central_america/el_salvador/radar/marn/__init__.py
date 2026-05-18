@@ -23,15 +23,17 @@ from .source import (
     _MARN_HUE_MAX,
     _MARN_HUE_MIN,
 )
-from .stations import STATIONS
+from .stations import RANGE_OVERRIDES, STATION_MAP, STATIONS
 
 REGION_GROUP = "CENTRAL_AMERICA"
 
 __all__ = [
     "MARNSource",
+    "RANGE_OVERRIDES",
     "REGIONS",
     "REGION_GROUP",
     "STATIONS",
+    "STATION_MAP",
     "SVCOMP",
     "_MARN_DBZ_MAX",
     "_MARN_DBZ_MIN",
@@ -56,5 +58,6 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         regions=list(REGIONS),
         instance=instance,
         group=REGION_GROUP,
-        stations=list(STATIONS),
+        station_map={k: list(v) for k, v in STATION_MAP.items()},
+        range_overrides=dict(RANGE_OVERRIDES),
     )

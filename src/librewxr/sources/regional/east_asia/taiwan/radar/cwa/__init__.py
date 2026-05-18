@@ -16,15 +16,17 @@ from librewxr.sources._base import RadarSourceContribution
 
 from .regions import REGIONS, TWCOMP
 from .source import CWASource, _parse_cwa_xml
-from .stations import STATIONS
+from .stations import RANGE_OVERRIDES, STATION_MAP, STATIONS
 
 REGION_GROUP = "TAIWAN"
 
 __all__ = [
     "CWASource",
+    "RANGE_OVERRIDES",
     "REGIONS",
     "REGION_GROUP",
     "STATIONS",
+    "STATION_MAP",
     "TWCOMP",
     "_parse_cwa_xml",
     "radar_provider",
@@ -45,5 +47,6 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         regions=list(REGIONS),
         instance=instance,
         group=REGION_GROUP,
-        stations=list(STATIONS),
+        station_map={k: list(v) for k, v in STATION_MAP.items()},
+        range_overrides=dict(RANGE_OVERRIDES),
     )

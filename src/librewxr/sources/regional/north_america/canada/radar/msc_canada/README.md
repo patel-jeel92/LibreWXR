@@ -63,8 +63,7 @@ Citation block in the top-level `README.md` and `docs/coverage.md`.
 ## Stations
 
 32 S-band dual-pol radars (METEOR 1700S) after the 2023 ECCC network
-modernization.  Full list in `stations.py`; coverage-mask consumption
-is still via `librewxr.data.radar_stations` (Phase 1 — Phase 2 will
-switch it over).  Without the station-circle mask the ECMWF fallback
-would be suppressed across the entire CACOMP bbox (open Pacific,
-Arctic, Atlantic) where MSC has no real coverage.
+modernization.  Full list in `stations.py`; feeds `data/coverage.py` via
+the `RadarSourceContribution`.  Without the station-circle mask the
+ECMWF fallback would be suppressed across the entire CACOMP bbox (open
+Pacific, Arctic, Atlantic) where MSC has no real coverage.

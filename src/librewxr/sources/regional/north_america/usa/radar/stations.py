@@ -7,14 +7,12 @@ contribution carries just the NEXRAD lists; MRMS additionally combines
 NEXRAD with the ECCC Canadian network for the bordered USCOMP/CACOMP
 masks.
 
-Per-region split kept so the future Phase 2 coverage-mask consumer can
-build per-region station circles without re-deriving the split from a
-flat combined list.
+Per-region split kept so the coverage-mask consumer can build per-region
+station circles without re-deriving the split from a flat combined list.
 
-Note (2026-05-17): Coverage-mask generation still reads from
-``librewxr.data.radar_stations`` for now.  Phase 2 of the sources
-refactor migrates that consumer over to per-source ``stations.py``
-files like this one.
+Sources:
+- NEXRAD WSR-88D (US): official NOAA station list at
+  https://www.ncei.noaa.gov/access/homr/file/nexrad-stations.txt
 """
 from __future__ import annotations
 
@@ -199,18 +197,13 @@ NEXRAD_GUAM: list[tuple[float, float]] = [
 ]
 
 
-# Per-region mapping for Phase 2 coverage-mask wiring.
-REGION_STATIONS: dict[str, list[tuple[float, float]]] = {
+# Per-region map keyed by region name — used by the IEM provider for
+# coverage-mask metadata.  MRMS combines this with the Canadian network
+# in ``mrms/stations.py``.
+STATION_MAP: dict[str, list[tuple[float, float]]] = {
     "USCOMP": NEXRAD_CONUS,
     "AKCOMP": NEXRAD_ALASKA,
     "HICOMP": NEXRAD_HAWAII,
     "PRCOMP": NEXRAD_PUERTO_RICO,
     "GUCOMP": NEXRAD_GUAM,
 }
-
-# Flat union for RadarSourceContribution.stations field — Phase 2 will
-# replace this single-list shape with the per-region map above.
-STATIONS: list[tuple[float, float]] = (
-    NEXRAD_CONUS + NEXRAD_ALASKA + NEXRAD_HAWAII
-    + NEXRAD_PUERTO_RICO + NEXRAD_GUAM
-)

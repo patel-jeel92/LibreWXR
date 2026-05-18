@@ -27,15 +27,14 @@ from .source import (
     _resample_mrms_to_region,
     _suppress_eccodes_stderr,
 )
-from .stations import MRMS_STATIONS, STATIONS
+from .stations import STATION_MAP
 
 __all__ = [
     "MRMSCompositeSource",
     "MRMSSource",
     "MRMS_EXTENTS",
     "MRMS_PRODUCTS",
-    "MRMS_STATIONS",
-    "STATIONS",
+    "STATION_MAP",
     "_parse_mrms_grib2",
     "_resample_mrms_to_region",
     "_suppress_eccodes_stderr",
@@ -65,5 +64,5 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         regions=list(USA_REGIONS),
         instance=instance,
         group="US",
-        stations=list(STATIONS),
+        station_map={k: list(v) for k, v in STATION_MAP.items()},
     )

@@ -36,8 +36,6 @@ the top-level `README.md` and `docs/coverage.md`.
 
 ## Stations
 
-12-radar national network (MY2809–MY2819, MY2865).  Coordinates live in
-`stations.py`; they're forwarded via the `RadarSourceContribution.stations`
-field, though Phase 1 of the sources refactor still has
-`librewxr.data.coverage` reading from `librewxr.data.radar_stations` —
-Phase 2 will switch it over.
+12-radar national network (MY2809–MY2819, MY2865).  Coordinates and the
+375 km / 350 km range overrides live in `stations.py` and feed
+`data/coverage.py` via the `RadarSourceContribution`.

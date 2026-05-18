@@ -18,14 +18,15 @@ import math
 import cv2
 import numpy as np
 
-from librewxr.data.radar_stations import (
-    RADAR_RANGE_KM,
-    REGION_RADAR_RANGE,
-    REGION_STATIONS,
-)
 from librewxr.data.regions import REGIONS, RegionDef
 
 logger = logging.getLogger(__name__)
+
+# Default effective precipitation detection range (km).  Per-source
+# ``range_overrides`` (passed into ``build_coverage_masks``) replace this
+# for individual regions; the OPERA C-band fleet, El Salvador's 120 km
+# overlay, and CWA Taiwan's typhoon-tracking extent all do so.
+DEFAULT_RADAR_RANGE_KM = 240.0
 
 # Coarse grid resolution for coverage masks. 0.05° ≈ 5.5 km at the equator,
 # much finer than the ~240 km radar range so blob edges are smooth.
@@ -35,7 +36,11 @@ MASK_RESOLUTION_DEG = 0.05
 _COVERAGE_MASKS: dict[str, tuple[np.ndarray, float, float, float, float]] = {}
 
 
-def _build_region_mask(region: RegionDef, stations: list[tuple[float, float]]) -> None:
+def _build_region_mask(
+    region: RegionDef,
+    stations: list[tuple[float, float]],
+    range_km: float,
+) -> None:
     """Build a boolean coverage mask for one region and store it.
 
     Uses an equirectangular approximation (valid for regional bboxes):
@@ -57,7 +62,6 @@ def _build_region_mask(region: RegionDef, stations: list[tuple[float, float]]) -
     lat_grid, lon_grid = np.meshgrid(lat_axis, lon_axis, indexing="ij")
 
     mask = np.zeros((ny, nx), dtype=bool)
-    range_km = REGION_RADAR_RANGE.get(region.name, RADAR_RANGE_KM)
     range_km_sq = range_km * range_km
 
     for st_lat, st_lon in stations:
@@ -76,23 +80,30 @@ def _build_region_mask(region: RegionDef, stations: list[tuple[float, float]]) -
 
 
 def build_coverage_masks(
-    station_overrides: dict[str, list[tuple[float, float]]] | None = None,
+    station_map: dict[str, list[tuple[float, float]]],
+    range_overrides: dict[str, float] | None = None,
 ) -> None:
-    """Build coverage masks for every region with known stations.
+    """Build coverage masks for every region in ``station_map``.
 
     Args:
-        station_overrides: Optional mapping of region name to a custom
-            station list. When provided, these override the default
-            REGION_STATIONS entries. Used when MRMS is the active source
-            for USCOMP/CACOMP (which combines NEXRAD + Canadian stations).
+        station_map: Mapping of region name to its contributing radar
+            stations.  Typically assembled by
+            ``librewxr.sources.collect_radar_coverage_metadata`` from the
+            active radar providers — but any dict works, which keeps the
+            mask builder testable in isolation.
+        range_overrides: Optional mapping of region name to a custom
+            effective range (km).  Regions absent here use
+            ``DEFAULT_RADAR_RANGE_KM``.  Used by OPERA (300 km C-band
+            reach), SVCOMP (120 km product), CWA TWCOMP (450 km typhoon
+            buffer), and the MET Malaysia regions.
     """
-    for region_name, stations in REGION_STATIONS.items():
-        if station_overrides and region_name in station_overrides:
-            stations = station_overrides[region_name]
+    range_overrides = range_overrides or {}
+    for region_name, stations in station_map.items():
         region = REGIONS.get(region_name)
         if region is None:
             continue
-        _build_region_mask(region, stations)
+        range_km = range_overrides.get(region_name, DEFAULT_RADAR_RANGE_KM)
+        _build_region_mask(region, stations, range_km)
 
 
 def sample_coverage(

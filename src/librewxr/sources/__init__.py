@@ -66,3 +66,40 @@ def _collect_providers() -> tuple[list, list]:
 
 
 RADAR_PROVIDERS, NWP_PROVIDERS = _collect_providers()
+
+
+def collect_radar_coverage_metadata(
+    settings,
+) -> tuple[
+    dict[str, list[tuple[float, float]]],
+    dict[str, float],
+]:
+    """Walk active radar providers; return merged station + range maps.
+
+    Returns ``(station_map, range_overrides)`` aggregated across every
+    provider that didn't return ``None`` for the given ``settings``.
+    Used by ``data.coverage.build_coverage_masks`` to size station-circle
+    masks directly from per-source data, with no central station table.
+
+    The walk respects the same provider gating as the fetcher (e.g.
+    MRMS vs. IEM via ``na_source``), so the coverage masks always reflect
+    whichever source is actually fetching frames.  If two providers
+    contribute the same region key (shouldn't happen in practice — the
+    fetcher itself would also fight over it), later providers win for
+    that key.
+    """
+    station_map: dict[str, list[tuple[float, float]]] = {}
+    range_overrides: dict[str, float] = {}
+    for provider in RADAR_PROVIDERS:
+        try:
+            contribution = provider(settings)
+        except Exception:
+            logger.exception("Radar source provider %r raised", provider)
+            continue
+        if contribution is None:
+            continue
+        for region_name, stations in contribution.station_map.items():
+            station_map[region_name] = list(stations)
+        for region_name, range_km in contribution.range_overrides.items():
+            range_overrides[region_name] = range_km
+    return station_map, range_overrides
