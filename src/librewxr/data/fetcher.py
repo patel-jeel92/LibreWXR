@@ -540,6 +540,7 @@ class RadarFetcher:
 
         # Store frames
         added = 0
+        any_merged = False
         for ts, regions_data in frames_by_ts.items():
             frame = RadarFrame(timestamp=ts, regions=regions_data)
             evicted_ts, merged = await self._store.add_frame(frame)
@@ -549,12 +550,20 @@ class RadarFetcher:
                 # Region data was merged into an existing frame — flush
                 # stale tiles that were rendered without the new regions.
                 self._cache.invalidate_timestamp(ts)
+                any_merged = True
             if self._radar_cache is not None:
                 try:
                     self._radar_cache.write_frame(frame)
                 except Exception:
                     logger.exception("Failed to persist radar frame %d", ts)
             added += 1
+
+        # Merges only invalidate the pipeline's local cache, which the
+        # render workers don't share.  Dump state.json now so the workers
+        # poll the mtime change and flush their own tile caches without
+        # waiting for the end-of-cycle snapshot.
+        if any_merged:
+            await self._fire_cycle_complete()
 
         if self._radar_cache is not None and frames_by_ts:
             try:
