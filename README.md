@@ -465,6 +465,19 @@ PNGs with
 after adding or changing a radar source or NWP grid (the script header
 documents the throwaway venv recipe).
 
+### Adding a new source
+
+Every radar composite and regional NWP grid lives as a self-contained
+package under `src/librewxr/sources/` and is auto-discovered at startup.
+Adding a new source means creating one directory; the discovery walker
+handles registration, so `data/fetcher.py`, `data/regions.py`, and
+`data/coverage.py` need no edits.
+
+See [`docs/adding-a-source.md`](docs/adding-a-source.md) for the full
+walkthrough — directory layout, provider function shapes, the
+country-dir convention, station / range overrides, NWP priority
+numbers, worked examples, and a final PR checklist.
+
 ### Deployment modes
 
 LibreWXR supports two deployment modes.

@@ -14,7 +14,7 @@ import xarray as xr
 pytestmark = pytest.mark.sources
 
 from librewxr.data.regions import REGIONS, resolve_regions
-from librewxr.data.sources import _dbz_float_to_uint8
+from librewxr.sources._helpers import _dbz_float_to_uint8
 from librewxr.sources.regional.north_america.usa.radar.mrms import (
     MRMS_EXTENTS,
     MRMSSource,

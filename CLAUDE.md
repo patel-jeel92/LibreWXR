@@ -28,24 +28,45 @@ Configuration is via environment variables prefixed `LIBREWXR_` or a `.env` file
 
 ```
 src/librewxr/
-  main.py           # FastAPI app, lifespan, uvicorn entry point
+  main.py            # FastAPI app, lifespan, uvicorn entry point
+  data_pipeline.py   # Standalone fetcher process (multi-worker deployment)
   config.py          # Pydantic Settings (all LIBREWXR_* env vars)
   memory.py          # Memory pressure monitor
   api/
     routes.py        # API endpoints (Rain Viewer-compatible)
     models.py        # Pydantic response models
-  data/
-    regions.py       # RegionDef definitions and projection params
-    sources.py       # Radar source classes (MRMS, IEM, MSC Canada, MARN, OPERA, CWA)
-    mmd_source.py    # MET Malaysia radar source (split out of sources.py)
+  sources/                                # Per-source packages (auto-discovered)
+    _base.py                              # Protocols + contribution dataclasses
+    _helpers.py                           # Shared dBZ encoder + GRIB stderr muzzle
+    __init__.py                           # Discovery walker, registry, helpers
+    world/ifs/                            # ECMWF IFS (global, NWP)
+    regional/
+      caribbean/nwp/arome_antilles/       # AROME Antilles (FR-GP+MQ+GF)
+      central_america/el_salvador/radar/marn/
+      east_asia/taiwan/radar/cwa/
+      europe/radar/opera/
+      europe/nwp/{icon_eu,dmi_dini}/
+      north_america/
+        canada/radar/msc_canada/
+        canada/nwp/hrdps/
+        usa/radar/{iem,mrms}/
+        usa/nwp/{hrrr,hrrr_alaska}/
+      south_america/nwp/wrf_smn/          # WRF-SMN (AR+CL+UY+PY+BO+S.BR)
+      southeast_asia/malaysia/radar/mmd/
+  data/                                   # Cross-cutting infra only
+    regions.py       # RegionDef base + REGIONS dict (built from discovery)
     fetcher.py       # Multi-source fetch orchestrator
     store.py         # FrameStore (RadarFrame ring buffer)
-    coverage.py      # Radar station coverage masks
-    ecmwf_grid.py    # ECMWF IFS global precipitation grid
-    ecmwf_interpolation.py  # Optical flow interpolation (hourly -> 10-min)
+    coverage.py      # Radar station coverage masks (parameter-driven)
     nowcast.py       # Nowcast generation (radar extrapolation + IFS blend)
+    nwp_source.py    # NWPSource Protocol + NWPChain dispatcher
+    nwp_interpolation.py  # Shared optical-flow helper for regional NWP
     cloud_grid.py    # IFS-derived cloud cover (satellite layer)
     cloud_cache.py   # Persistent disk cache for cloud grids
+    radar_cache.py   # Persistent disk cache for radar frames
+    alerts_fetcher.py / alerts_store.py   # WMO weather alerts
+    master_state.py  # Multi-worker state.json snapshot
+    retry.py         # Backoff helper
   tiles/
     renderer.py      # On-demand tile rendering
     satellite_renderer.py  # Cloud cover → IR-like satellite tiles
@@ -78,7 +99,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **Multi-region:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA), Taiwan (TWCOMP), SE Asia (MYPENINSULAR, MYEAST)
 - **Region groups:** CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, SOUTHEAST_ASIA, TAIWAN, ALL (configured via `LIBREWXR_ENABLED_REGIONS`)
 - **NA source:** 3-way `LIBREWXR_NA_SOURCE` setting — `mrms_fallback` (default: MRMS + IEM/MSC fallback), `mrms` (MRMS only), `iem` (legacy IEM + MSC)
-- **Source dispatch:** `RadarFetcher` routes each region group to the correct source class
+- **Source dispatch:** `RadarFetcher` walks the auto-discovered radar providers under `sources/` and routes each region to the contributing source. NWP grids work the same way via `collect_nwp_contributions()`.
 - **Frame cadence:** 10 minutes, clock-aligned to match Rain Viewer
 - **RadarFrame.regions:** `dict[str, np.ndarray]` keyed by region name, uint8 dBZ encoding
 - **Projections:** RegionDef supports latlon, LCC (`proj="lcc"`), polar stereographic (`proj="stere"`), and LAEA
@@ -90,16 +111,20 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **MRMS:** Region-aware — separate `MRMSSource` per product path (CONUS, ALASKA, HAWAII, CARIB, GUAM); directory listing with bisect for archive lookups; gzip retry + eccodes stderr suppression
 - **MARN/SNET (El Salvador):** Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from anonymous GCS bucket `radar-images-sv`; 5-min cadence; filename embeds local time (UTC-6, no DST); decoder maps HSV-style continuous hue gradient (green→cyan→blue→magenta) to dBZ; bucket archive depth ~24 h; MARN license requires citation
 - **CWA (Taiwan):** 7-radar QPESUMS composite (`O-A0059-001` / 雷達合成回波) from anonymous AWS S3 bucket `cwaopendata` in `ap-northeast-1`; 10-min cadence; archive key uses UTC+8 timestamp with no separator dot (`{YYYYMMDDHHMM}compref_mosaic.xml`); XML format with raw dBZ as comma-separated scientific-notation floats; data is row-major south-to-north → vertical flip on decode; sentinels `-99`/`-999`; OGDL v1.0 license, attribution required
-- **MMD (MET Malaysia):** 12-radar national composite covering Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra via anonymous HTTPS at `api.met.gov.my`; 10-min native cadence; one animated GIF per fetch (1352×570, 6 frames, ~60 min of backfill); 18-stop palette → dBZ Marshall-Palmer table; combined GIF split into MYPENINSULAR + MYEAST sub-rects (peer regions, one fetch shared between them); per-frame timestamps anchored at the current wall-clock 10-min slot because MET publishes each slot ~11 min after its real data time (anchoring on real time leaves the "current" slot perpetually empty); post-decode morphological close fills hairline gaps left by burned-in state-boundary lines; CC-BY-4.0 attribution required; lives in `data/mmd_source.py` (first radar source split out of `sources.py`)
+- **MMD (MET Malaysia):** 12-radar national composite covering Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra via anonymous HTTPS at `api.met.gov.my`; 10-min native cadence; one animated GIF per fetch (1352×570, 6 frames, ~60 min of backfill); 18-stop palette → dBZ Marshall-Palmer table; combined GIF split into MYPENINSULAR + MYEAST sub-rects (peer regions, one fetch shared between them); per-frame timestamps anchored at the current wall-clock 10-min slot because MET publishes each slot ~11 min after its real data time (anchoring on real time leaves the "current" slot perpetually empty); post-decode morphological close fills hairline gaps left by burned-in state-boundary lines; CC-BY-4.0 attribution required
 
-## Adding a New Region
+## Adding a New Source
 
-1. Define `RegionDef` in `data/regions.py` (with projection params if non-latlon)
-2. Create source class in `data/sources.py` (fetch + parse + convert to uint8 dBZ)
-3. Add group dispatch in `fetcher.py` `__init__`
-4. Add config setting if a new base URL is needed
-5. Everything downstream (store, renderer, API, cache) is source-agnostic
-6. Add the new domain to `scripts/generate_coverage_map.py` and regenerate `docs/coverage-map-radar.png` / `docs/coverage-map-models.png` (script header documents the throwaway-venv recipe)
+See **`docs/adding-a-source.md`** for the full walkthrough (directory layout, provider function shape, country-dir convention, station + range overrides, NWP priority assignment, worked examples).
+
+Short version:
+1. Create a self-contained package under `sources/regional/<continent>/<country>/{radar,nwp}/<source_name>/` (or `sources/world/<source>/` for global sources). Multi-country sources skip the country directory.
+2. Implement the fetcher/decoder in `source.py` (radar) or `grid.py` (NWP). Radar sources also need `regions.py` (`RegionDef` definitions + `REGIONS` list + `REGION_GROUP` string) and `stations.py` (`STATION_MAP` + optional `RANGE_OVERRIDES`).
+3. In the package `__init__.py`, expose a `radar_provider(settings)` or `nwp_provider(settings, cache_dir)` that returns a `RadarSourceContribution` / `NWPContribution` (or `None` when disabled).
+4. Add any new env vars to `config.py`. New sources default to enabled by `*_enabled = True` per project convention.
+5. Add a coverage polygon to `scripts/generate_coverage_map.py` and regenerate `docs/coverage-map-radar.png` / `docs/coverage-map-models.png` (script header documents the throwaway-venv recipe).
+
+The discovery walker in `sources/__init__.py` picks up the new package automatically — `data/fetcher.py`, `data/regions.py`, and `data/coverage.py` need no edits.
 
 ## Development Conventions
 

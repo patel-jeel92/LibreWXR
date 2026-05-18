@@ -452,7 +452,7 @@ async def find_2t_message_offset(
 
 
 def _suppress_eccodes_stderr():
-    from librewxr.data.sources import _suppress_eccodes_stderr as _s
+    from librewxr.sources._helpers import _suppress_eccodes_stderr as _s
     return _s()
 
 

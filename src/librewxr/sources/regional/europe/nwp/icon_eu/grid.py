@@ -213,7 +213,7 @@ def file_url(run: datetime, step_hour: int, param: str) -> str:
 # ── GRIB2 decode + bzip2 unpack ───────────────────────────────────────
 
 def _suppress_eccodes_stderr():
-    from librewxr.data.sources import _suppress_eccodes_stderr as _s
+    from librewxr.sources._helpers import _suppress_eccodes_stderr as _s
     return _s()
 
 

@@ -307,7 +307,7 @@ async def fetch_byte_range(
 # Lazily import the eccodes-stderr suppressor so this module's import
 # graph mirrors the IFS / MRMS pattern (sources.py owns the helper).
 def _suppress_eccodes_stderr():
-    from librewxr.data.sources import _suppress_eccodes_stderr as _s
+    from librewxr.sources._helpers import _suppress_eccodes_stderr as _s
     return _s()
 
 

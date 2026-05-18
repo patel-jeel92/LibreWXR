@@ -32,7 +32,7 @@ from librewxr.data.regions import RegionDef
 from librewxr.data.retry import retry_get
 # Shared dBZ → uint8 encoder.  Currently lives in ``data/sources.py``;
 # moves out of there once that file is empty of legacy classes.
-from librewxr.data.sources import _dbz_float_to_uint8
+from librewxr.sources._helpers import _dbz_float_to_uint8
 
 logger = logging.getLogger(__name__)
 

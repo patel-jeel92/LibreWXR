@@ -358,7 +358,7 @@ class TestDecodeOrientation:
 
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
         # Patch the lazy-imported _suppress_eccodes_stderr inside the module
-        import librewxr.data.sources as _sources_mod
+        import librewxr.sources._helpers as _sources_mod
         monkeypatch.setattr(_sources_mod, "_suppress_eccodes_stderr", _noop)
 
         arr = hagm.decode_refc_message(b"ignored bytes")
@@ -404,7 +404,7 @@ class TestDecodeOrientation:
             yield
 
         monkeypatch.setattr(xr, "open_dataset", lambda *a, **kw: fake_ds)
-        import librewxr.data.sources as _sources_mod
+        import librewxr.sources._helpers as _sources_mod
         monkeypatch.setattr(_sources_mod, "_suppress_eccodes_stderr", _noop)
 
         arr = hagm.decode_refc_message(b"ignored bytes")

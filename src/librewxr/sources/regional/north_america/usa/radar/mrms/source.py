@@ -37,7 +37,7 @@ from librewxr.data.regions import RegionDef
 from librewxr.data.retry import retry_get
 # Shared with the NWP grid modules — kept in ``data/sources.py`` until
 # Phase 3/4 of the refactor relocates it.
-from librewxr.data.sources import _dbz_float_to_uint8, _suppress_eccodes_stderr
+from librewxr.sources._helpers import _dbz_float_to_uint8, _suppress_eccodes_stderr
 
 from .products import MRMS_PRODUCTS
 

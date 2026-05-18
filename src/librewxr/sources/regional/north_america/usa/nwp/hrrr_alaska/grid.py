@@ -235,7 +235,7 @@ def decode_refc_message(grib_bytes: bytes) -> np.ndarray | None:
     """
     import xarray as xr
 
-    from librewxr.data.sources import _suppress_eccodes_stderr
+    from librewxr.sources._helpers import _suppress_eccodes_stderr
 
     tmp_path = None
     try:
@@ -318,7 +318,7 @@ def decode_tmp_2m_message(grib_bytes: bytes) -> np.ndarray | None:
     """
     import xarray as xr
 
-    from librewxr.data.sources import _suppress_eccodes_stderr
+    from librewxr.sources._helpers import _suppress_eccodes_stderr
 
     tmp_path = None
     try:

@@ -25,7 +25,7 @@ import numpy as np
 
 from librewxr.data.regions import RegionDef
 from librewxr.data.retry import retry_get
-from librewxr.data.sources import _dbz_float_to_uint8
+from librewxr.sources._helpers import _dbz_float_to_uint8
 
 logger = logging.getLogger(__name__)
 
