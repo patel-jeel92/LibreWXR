@@ -99,7 +99,7 @@ PAGASA publishes a single 2048×2048 PNG covering the whole archipelago, but the
 
 What it would take to revisit: per-station ranges (the current radar infrastructure assumes one range per region), max-pool downsampling for sparse high-res frames at low zoom, and optional disabling of the NWP fallback over PHCOMP to make the rendered output match PANAHON's radar-only appearance. Defensible to leave it removed indefinitely.
 
-The license is fine — PAGASA's site-wide statement that all data is in the public domain unless otherwise stated covers the radar imagery — but a usable license is necessary, not sufficient.
+Worth noting the license itself was fine — PAGASA's site-wide public-domain statement covered the radar imagery. The revert was a data-quality call, not a licensing one. An open license is a prerequisite for upstream inclusion, but the data also has to be usable in practice.
 
 ## Radar — Tier 1
 
