@@ -126,6 +126,10 @@ async def run_pipeline() -> None:
     hrrr_alaska_grid = nwp_by_name.get("HRRR-Alaska")
     hrdps_grid = nwp_by_name.get("HRDPS")
     arome_antilles_grid = nwp_by_name.get("AROME Antilles")
+    arome_guyane_grid = nwp_by_name.get("AROME Guyane")
+    arome_indien_grid = nwp_by_name.get("AROME Indien")
+    arome_ncaled_grid = nwp_by_name.get("AROME Nouvelle-Calédonie")
+    arome_polyn_grid = nwp_by_name.get("AROME Polynésie")
     wrf_smn_grid = nwp_by_name.get("WRF-SMN")
     icon_eu_grid = nwp_by_name.get("ICON-EU")
     dmi_dini_grid = nwp_by_name.get("DMI DINI")
@@ -176,6 +180,10 @@ async def run_pipeline() -> None:
         "hrrr_alaska_grid": hrrr_alaska_grid,
         "hrdps_grid": hrdps_grid,
         "arome_antilles_grid": arome_antilles_grid,
+        "arome_guyane_grid": arome_guyane_grid,
+        "arome_indien_grid": arome_indien_grid,
+        "arome_ncaled_grid": arome_ncaled_grid,
+        "arome_polyn_grid": arome_polyn_grid,
         "wrf_smn_grid": wrf_smn_grid,
         "icon_eu_grid": icon_eu_grid,
         "dmi_dini_grid": dmi_dini_grid,
@@ -197,6 +205,10 @@ async def run_pipeline() -> None:
         hrrr_alaska_grid=hrrr_alaska_grid,
         hrdps_grid=hrdps_grid,
         arome_antilles_grid=arome_antilles_grid,
+        arome_guyane_grid=arome_guyane_grid,
+        arome_indien_grid=arome_indien_grid,
+        arome_ncaled_grid=arome_ncaled_grid,
+        arome_polyn_grid=arome_polyn_grid,
         wrf_smn_grid=wrf_smn_grid,
         icon_eu_grid=icon_eu_grid,
         dmi_dini_grid=dmi_dini_grid,

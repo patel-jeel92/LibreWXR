@@ -14,12 +14,16 @@ from librewxr.memory import release_memory
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.regions import REGIONS, RegionDef
 from librewxr.sources.world.ifs import ECMWFGrid
+from librewxr.sources.regional.africa.nwp.arome_indien import AROMEIndienGrid
 from librewxr.sources.regional.caribbean.nwp.arome_antilles import AROMEAntillesGrid
 from librewxr.sources.regional.europe.nwp.dmi_dini import DMIDiniGrid
 from librewxr.sources.regional.europe.nwp.icon_eu import ICONEUGrid
 from librewxr.sources.regional.north_america.canada.nwp.hrdps import HRDPSGrid
 from librewxr.sources.regional.north_america.usa.nwp.hrrr import HRRRGrid
 from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import HRRRAlaskaGrid
+from librewxr.sources.regional.oceania.nwp.arome_ncaled import AROMENCaledGrid
+from librewxr.sources.regional.oceania.nwp.arome_polyn import AROMEPolynGrid
+from librewxr.sources.regional.south_america.nwp.arome_guyane import AROMEGuyaneGrid
 from librewxr.sources.regional.south_america.nwp.wrf_smn import WRFSMNGrid
 # Cross-source policy stays in this file (the discovery walker
 # populates ``self._sources`` but blending and fallback still belong
@@ -59,6 +63,10 @@ class RadarFetcher:
         hrrr_alaska_grid: HRRRAlaskaGrid | None = None,
         hrdps_grid: HRDPSGrid | None = None,
         arome_antilles_grid: AROMEAntillesGrid | None = None,
+        arome_guyane_grid: AROMEGuyaneGrid | None = None,
+        arome_indien_grid: AROMEIndienGrid | None = None,
+        arome_ncaled_grid: AROMENCaledGrid | None = None,
+        arome_polyn_grid: AROMEPolynGrid | None = None,
         wrf_smn_grid: WRFSMNGrid | None = None,
         icon_eu_grid: ICONEUGrid | None = None,
         dmi_dini_grid: DMIDiniGrid | None = None,
@@ -75,6 +83,10 @@ class RadarFetcher:
         self._hrrr_alaska_grid = hrrr_alaska_grid
         self._hrdps_grid = hrdps_grid
         self._arome_antilles_grid = arome_antilles_grid
+        self._arome_guyane_grid = arome_guyane_grid
+        self._arome_indien_grid = arome_indien_grid
+        self._arome_ncaled_grid = arome_ncaled_grid
+        self._arome_polyn_grid = arome_polyn_grid
         self._wrf_smn_grid = wrf_smn_grid
         self._icon_eu_grid = icon_eu_grid
         self._dmi_dini_grid = dmi_dini_grid
@@ -208,6 +220,14 @@ class RadarFetcher:
             await self._hrdps_grid.close()
         if self._arome_antilles_grid:
             await self._arome_antilles_grid.close()
+        if self._arome_guyane_grid:
+            await self._arome_guyane_grid.close()
+        if self._arome_indien_grid:
+            await self._arome_indien_grid.close()
+        if self._arome_ncaled_grid:
+            await self._arome_ncaled_grid.close()
+        if self._arome_polyn_grid:
+            await self._arome_polyn_grid.close()
         if self._wrf_smn_grid:
             await self._wrf_smn_grid.close()
         if self._icon_eu_grid:
@@ -355,6 +375,30 @@ class RadarFetcher:
                 "AROME Antilles", self._arome_antilles_grid,
                 {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
                 "AROME Antilles fetch failed, Caribbean NWP layer may be stale",
+            ))
+        if self._arome_guyane_grid is not None:
+            grid_specs.append((
+                "AROME Guyane", self._arome_guyane_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "AROME Guyane fetch failed, French Guiana NWP layer may be stale",
+            ))
+        if self._arome_indien_grid is not None:
+            grid_specs.append((
+                "AROME Indien", self._arome_indien_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "AROME Indien fetch failed, SW Indian Ocean NWP layer may be stale",
+            ))
+        if self._arome_ncaled_grid is not None:
+            grid_specs.append((
+                "AROME Nouvelle-Calédonie", self._arome_ncaled_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "AROME Nouvelle-Calédonie fetch failed, SW Pacific NWP layer may be stale",
+            ))
+        if self._arome_polyn_grid is not None:
+            grid_specs.append((
+                "AROME Polynésie", self._arome_polyn_grid,
+                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
+                "AROME Polynésie fetch failed, S Pacific NWP layer may be stale",
             ))
         if self._wrf_smn_grid is not None:
             grid_specs.append((

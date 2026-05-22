@@ -26,12 +26,16 @@ from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
 )
+from librewxr.sources.regional.africa.nwp.arome_indien import AROMEIndienGrid
 from librewxr.sources.regional.caribbean.nwp.arome_antilles import AROMEAntillesGrid
 from librewxr.sources.regional.europe.nwp.dmi_dini import DMIDiniGrid
 from librewxr.sources.regional.europe.nwp.icon_eu import ICONEUGrid
 from librewxr.sources.regional.north_america.canada.nwp.hrdps import HRDPSGrid
 from librewxr.sources.regional.north_america.usa.nwp.hrrr import HRRRGrid
 from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import HRRRAlaskaGrid
+from librewxr.sources.regional.oceania.nwp.arome_ncaled import AROMENCaledGrid
+from librewxr.sources.regional.oceania.nwp.arome_polyn import AROMEPolynGrid
+from librewxr.sources.regional.south_america.nwp.arome_guyane import AROMEGuyaneGrid
 from librewxr.sources.regional.south_america.nwp.wrf_smn import WRFSMNGrid
 from librewxr.sources.world.ifs import ECMWFGrid
 from librewxr.data.alerts_store import AlertsStore
@@ -177,6 +181,10 @@ async def _render_only_lifespan(app: FastAPI):
     hrrr_alaska_grid = HRRRAlaskaGrid(cache_dir=cache_dir)
     hrdps_grid = HRDPSGrid(cache_dir=cache_dir)
     arome_antilles_grid = AROMEAntillesGrid(cache_dir=cache_dir)
+    arome_guyane_grid = AROMEGuyaneGrid(cache_dir=cache_dir)
+    arome_indien_grid = AROMEIndienGrid(cache_dir=cache_dir)
+    arome_ncaled_grid = AROMENCaledGrid(cache_dir=cache_dir)
+    arome_polyn_grid = AROMEPolynGrid(cache_dir=cache_dir)
     wrf_smn_grid = WRFSMNGrid(cache_dir=cache_dir)
     icon_eu_grid = ICONEUGrid(cache_dir=cache_dir)
     dmi_dini_grid = DMIDiniGrid(cache_dir=cache_dir)
@@ -191,6 +199,10 @@ async def _render_only_lifespan(app: FastAPI):
         "hrrr_alaska_grid": hrrr_alaska_grid,
         "hrdps_grid": hrdps_grid,
         "arome_antilles_grid": arome_antilles_grid,
+        "arome_guyane_grid": arome_guyane_grid,
+        "arome_indien_grid": arome_indien_grid,
+        "arome_ncaled_grid": arome_ncaled_grid,
+        "arome_polyn_grid": arome_polyn_grid,
         "wrf_smn_grid": wrf_smn_grid,
         "icon_eu_grid": icon_eu_grid,
         "dmi_dini_grid": dmi_dini_grid,
@@ -222,6 +234,10 @@ async def _render_only_lifespan(app: FastAPI):
     hrrr_alaska_grid = stores["hrrr_alaska_grid"]
     hrdps_grid = stores["hrdps_grid"]
     arome_antilles_grid = stores["arome_antilles_grid"]
+    arome_guyane_grid = stores["arome_guyane_grid"]
+    arome_indien_grid = stores["arome_indien_grid"]
+    arome_ncaled_grid = stores["arome_ncaled_grid"]
+    arome_polyn_grid = stores["arome_polyn_grid"]
     wrf_smn_grid = stores["wrf_smn_grid"]
     icon_eu_grid = stores["icon_eu_grid"]
     dmi_dini_grid = stores["dmi_dini_grid"]
@@ -237,7 +253,9 @@ async def _render_only_lifespan(app: FastAPI):
     chain_sources = []
     for grid in (
         hrrr_grid, hrrr_alaska_grid, hrdps_grid,
-        arome_antilles_grid, dmi_dini_grid, icon_eu_grid,
+        arome_antilles_grid, arome_guyane_grid, arome_indien_grid,
+        arome_ncaled_grid, arome_polyn_grid,
+        dmi_dini_grid, icon_eu_grid,
         wrf_smn_grid, ecmwf_grid,
     ):
         if grid is not None:
@@ -276,6 +294,10 @@ async def _render_only_lifespan(app: FastAPI):
     routes.hrrr_alaska_grid = hrrr_alaska_grid
     routes.hrdps_grid = hrdps_grid
     routes.arome_antilles_grid = arome_antilles_grid
+    routes.arome_guyane_grid = arome_guyane_grid
+    routes.arome_indien_grid = arome_indien_grid
+    routes.arome_ncaled_grid = arome_ncaled_grid
+    routes.arome_polyn_grid = arome_polyn_grid
     routes.wrf_smn_grid = wrf_smn_grid
     routes.icon_eu_grid = icon_eu_grid
     routes.dmi_dini_grid = dmi_dini_grid
@@ -375,6 +397,10 @@ async def lifespan(app: FastAPI):
     hrrr_alaska_grid = nwp_by_name.get("HRRR-Alaska")
     hrdps_grid = nwp_by_name.get("HRDPS")
     arome_antilles_grid = nwp_by_name.get("AROME Antilles")
+    arome_guyane_grid = nwp_by_name.get("AROME Guyane")
+    arome_indien_grid = nwp_by_name.get("AROME Indien")
+    arome_ncaled_grid = nwp_by_name.get("AROME Nouvelle-Calédonie")
+    arome_polyn_grid = nwp_by_name.get("AROME Polynésie")
     wrf_smn_grid = nwp_by_name.get("WRF-SMN")
     icon_eu_grid = nwp_by_name.get("ICON-EU")
     dmi_dini_grid = nwp_by_name.get("DMI DINI")
@@ -474,6 +500,10 @@ async def lifespan(app: FastAPI):
     routes.hrrr_alaska_grid = hrrr_alaska_grid
     routes.hrdps_grid = hrdps_grid
     routes.arome_antilles_grid = arome_antilles_grid
+    routes.arome_guyane_grid = arome_guyane_grid
+    routes.arome_indien_grid = arome_indien_grid
+    routes.arome_ncaled_grid = arome_ncaled_grid
+    routes.arome_polyn_grid = arome_polyn_grid
     routes.wrf_smn_grid = wrf_smn_grid
     routes.icon_eu_grid = icon_eu_grid
     routes.dmi_dini_grid = dmi_dini_grid
@@ -512,6 +542,10 @@ async def lifespan(app: FastAPI):
         hrrr_alaska_grid=hrrr_alaska_grid,
         hrdps_grid=hrdps_grid,
         arome_antilles_grid=arome_antilles_grid,
+        arome_guyane_grid=arome_guyane_grid,
+        arome_indien_grid=arome_indien_grid,
+        arome_ncaled_grid=arome_ncaled_grid,
+        arome_polyn_grid=arome_polyn_grid,
         wrf_smn_grid=wrf_smn_grid,
         icon_eu_grid=icon_eu_grid,
         dmi_dini_grid=dmi_dini_grid,
