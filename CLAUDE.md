@@ -128,7 +128,7 @@ Short version:
 4. Add any new env vars to `config.py`. New sources default to enabled by `*_enabled = True` per project convention.
 5. Add a coverage polygon to `scripts/generate_coverage_map.py` and regenerate `docs/coverage-map-radar.png` / `docs/coverage-map-models.png` (script header documents the throwaway-venv recipe).
 
-The discovery walker in `sources/__init__.py` picks up the new package automatically — `data/fetcher.py`, `data/regions.py`, and `data/coverage.py` need no edits.
+The discovery walker in `sources/__init__.py` picks up the new package automatically. `data/fetcher.py`, `data/regions.py`, `data/coverage.py`, `api/routes.py`, `main.py`, and `data_pipeline.py` all iterate the provider list / contribution slugs — no per-source plumbing is required. If a new NWP source has a `fetch()` signature different from the standard `(history_seconds, horizon_seconds)` shape, the fetcher uses `inspect.signature` to pass only the kwargs that signature accepts. If a contribution's display name doesn't slug cleanly (non-ASCII, abbreviations), set `slug="…_grid"` on the `NWPContribution` to pin the snapshot / `/health` key.
 
 ## Development Conventions
 

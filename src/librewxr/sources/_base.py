@@ -87,8 +87,16 @@ class NWPContribution:
 
     ``priority`` controls position in the NWPChain: lower runs earlier,
     so narrower / higher-resolution domains should use lower numbers.
+
+    ``slug`` overrides the auto-generated snapshot / ``/health`` key.
+    Leave it ``None`` to derive the key from ``name`` (lowercase,
+    non-alphanumerics replaced with underscores, ``_grid`` suffixed).
+    Three sources opt out: IFS (legacy key drops the "_ifs"), and the
+    two AROME-OM variants whose display names include non-ASCII
+    characters that wouldn't round-trip through the slugger.
     """
 
     instance: NWPGrid
     priority: int
     name: str
+    slug: str | None = None

@@ -24,4 +24,6 @@ def nwp_provider(settings, cache_dir) -> NWPContribution | None:
         instance=AROMEPolynGrid(cache_dir=cache_dir),
         priority=29,
         name="AROME Polynésie",
+        # Explicit abbreviation — auto-slug would mangle the accented é.
+        slug="arome_polyn_grid",
     )

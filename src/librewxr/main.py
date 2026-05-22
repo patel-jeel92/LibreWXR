@@ -25,19 +25,8 @@ from librewxr.data.store import FrameStore
 from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
+    nwp_grid_slug,
 )
-from librewxr.sources.regional.africa.nwp.arome_indien import AROMEIndienGrid
-from librewxr.sources.regional.caribbean.nwp.arome_antilles import AROMEAntillesGrid
-from librewxr.sources.regional.europe.nwp.dmi_dini import DMIDiniGrid
-from librewxr.sources.regional.europe.nwp.icon_eu import ICONEUGrid
-from librewxr.sources.regional.north_america.canada.nwp.hrdps import HRDPSGrid
-from librewxr.sources.regional.north_america.usa.nwp.hrrr import HRRRGrid
-from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import HRRRAlaskaGrid
-from librewxr.sources.regional.oceania.nwp.arome_ncaled import AROMENCaledGrid
-from librewxr.sources.regional.oceania.nwp.arome_polyn import AROMEPolynGrid
-from librewxr.sources.regional.south_america.nwp.arome_guyane import AROMEGuyaneGrid
-from librewxr.sources.regional.south_america.nwp.wrf_smn import WRFSMNGrid
-from librewxr.sources.world.ifs import ECMWFGrid
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
 from librewxr.memory import MemoryMonitor, detect_memory_limit_mb
@@ -172,40 +161,24 @@ async def _render_only_lifespan(app: FastAPI):
     await _wait_for_state(cache_dir, settings.state_wait_timeout)
 
     # Empty stores; __setstate__ wires up cache_dir and reopens memmaps.
-    # We construct the same superset the pipeline can dump so apply_state
-    # picks up whichever entries are present in the snapshot.
+    # We construct the same superset the pipeline can dump (via the
+    # provider walk) so apply_state picks up whichever entries are
+    # present in the snapshot.  Sources disabled by config produce no
+    # contribution and so won't be loaded even if the snapshot includes
+    # them — keep settings in sync between pipeline and render workers.
     store = FrameStore(max_frames=settings.max_frames, cache_dir=cache_dir)
     cache = TileCache(max_mb=settings.tile_cache_mb)
-    ecmwf_grid = ECMWFGrid(cache_dir=cache_dir)
-    hrrr_grid = HRRRGrid(cache_dir=cache_dir)
-    hrrr_alaska_grid = HRRRAlaskaGrid(cache_dir=cache_dir)
-    hrdps_grid = HRDPSGrid(cache_dir=cache_dir)
-    arome_antilles_grid = AROMEAntillesGrid(cache_dir=cache_dir)
-    arome_guyane_grid = AROMEGuyaneGrid(cache_dir=cache_dir)
-    arome_indien_grid = AROMEIndienGrid(cache_dir=cache_dir)
-    arome_ncaled_grid = AROMENCaledGrid(cache_dir=cache_dir)
-    arome_polyn_grid = AROMEPolynGrid(cache_dir=cache_dir)
-    wrf_smn_grid = WRFSMNGrid(cache_dir=cache_dir)
-    icon_eu_grid = ICONEUGrid(cache_dir=cache_dir)
-    dmi_dini_grid = DMIDiniGrid(cache_dir=cache_dir)
+    nwp_contribs = collect_nwp_contributions(settings, cache_dir)
+    nwp_grids_by_slug: dict[str, object] = {
+        nwp_grid_slug(c): c.instance for c in nwp_contribs
+    }
     cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
     nowcast_store = NowcastStore(cache_dir=cache_dir) if settings.nowcast_enabled else None
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
-    stores = {
+    stores: dict[str, object | None] = {
         "frame_store": store,
-        "ecmwf_grid": ecmwf_grid,
-        "hrrr_grid": hrrr_grid,
-        "hrrr_alaska_grid": hrrr_alaska_grid,
-        "hrdps_grid": hrdps_grid,
-        "arome_antilles_grid": arome_antilles_grid,
-        "arome_guyane_grid": arome_guyane_grid,
-        "arome_indien_grid": arome_indien_grid,
-        "arome_ncaled_grid": arome_ncaled_grid,
-        "arome_polyn_grid": arome_polyn_grid,
-        "wrf_smn_grid": wrf_smn_grid,
-        "icon_eu_grid": icon_eu_grid,
-        "dmi_dini_grid": dmi_dini_grid,
+        **nwp_grids_by_slug,
         "cloud_grid": cloud_grid,
         "nowcast_store": nowcast_store,
         "alerts_store": alerts_store,
@@ -229,18 +202,12 @@ async def _render_only_lifespan(app: FastAPI):
     for name in list(stores.keys()):
         if name not in refreshed and name != "frame_store":
             stores[name] = None
-    ecmwf_grid = stores["ecmwf_grid"]
-    hrrr_grid = stores["hrrr_grid"]
-    hrrr_alaska_grid = stores["hrrr_alaska_grid"]
-    hrdps_grid = stores["hrdps_grid"]
-    arome_antilles_grid = stores["arome_antilles_grid"]
-    arome_guyane_grid = stores["arome_guyane_grid"]
-    arome_indien_grid = stores["arome_indien_grid"]
-    arome_ncaled_grid = stores["arome_ncaled_grid"]
-    arome_polyn_grid = stores["arome_polyn_grid"]
-    wrf_smn_grid = stores["wrf_smn_grid"]
-    icon_eu_grid = stores["icon_eu_grid"]
-    dmi_dini_grid = stores["dmi_dini_grid"]
+    # Rebuild the slug → grid dict from the (post-drop) stores so the
+    # routes / chain only see grids that actually loaded from disk.
+    nwp_grids_by_slug = {
+        slug: stores[slug] for slug in nwp_grids_by_slug if stores[slug] is not None
+    }
+    ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
     cloud_grid = stores["cloud_grid"]
     nowcast_store = stores["nowcast_store"]
     alerts_store = stores["alerts_store"]
@@ -250,16 +217,14 @@ async def _render_only_lifespan(app: FastAPI):
     build_coverage_masks(station_map, range_overrides=range_overrides)
     build_feather_masks()
 
-    chain_sources = []
-    for grid in (
-        hrrr_grid, hrrr_alaska_grid, hrdps_grid,
-        arome_antilles_grid, arome_guyane_grid, arome_indien_grid,
-        arome_ncaled_grid, arome_polyn_grid,
-        dmi_dini_grid, icon_eu_grid,
-        wrf_smn_grid, ecmwf_grid,
-    ):
-        if grid is not None:
-            chain_sources.append(grid)
+    # Chain order mirrors ``collect_nwp_contributions`` (sorted by
+    # priority) — only include grids that survived the snapshot drop
+    # above.  Built from the sorted ``nwp_contribs`` rather than the
+    # dict so chain order stays stable independent of dict iteration.
+    chain_sources = [
+        c.instance for c in nwp_contribs
+        if nwp_grid_slug(c) in nwp_grids_by_slug
+    ]
     nwp_chain = NWPChain(chain_sources)
     logger.info(
         "Render-only NWP chain: [%s]",
@@ -289,18 +254,8 @@ async def _render_only_lifespan(app: FastAPI):
 
     routes.frame_store = store
     routes.tile_cache = cache
+    routes.nwp_grids = nwp_grids_by_slug
     routes.ecmwf_grid = ecmwf_grid
-    routes.hrrr_grid = hrrr_grid
-    routes.hrrr_alaska_grid = hrrr_alaska_grid
-    routes.hrdps_grid = hrdps_grid
-    routes.arome_antilles_grid = arome_antilles_grid
-    routes.arome_guyane_grid = arome_guyane_grid
-    routes.arome_indien_grid = arome_indien_grid
-    routes.arome_ncaled_grid = arome_ncaled_grid
-    routes.arome_polyn_grid = arome_polyn_grid
-    routes.wrf_smn_grid = wrf_smn_grid
-    routes.icon_eu_grid = icon_eu_grid
-    routes.dmi_dini_grid = dmi_dini_grid
     routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud_grid
     routes.tile_warmer = None
@@ -392,19 +347,13 @@ async def lifespan(app: FastAPI):
     # (10) → HRRR-Alaska (11) → HRDPS (20) → AROME Antilles (25) → DMI
     # DINI (30) → ICON-EU (35) → WRF-SMN (40) → IFS (1000 — catch-all).
     nwp_contribs = collect_nwp_contributions(settings, nwp_cache_dir)
-    nwp_by_name = {c.name: c.instance for c in nwp_contribs}
-    hrrr_grid = nwp_by_name.get("HRRR")
-    hrrr_alaska_grid = nwp_by_name.get("HRRR-Alaska")
-    hrdps_grid = nwp_by_name.get("HRDPS")
-    arome_antilles_grid = nwp_by_name.get("AROME Antilles")
-    arome_guyane_grid = nwp_by_name.get("AROME Guyane")
-    arome_indien_grid = nwp_by_name.get("AROME Indien")
-    arome_ncaled_grid = nwp_by_name.get("AROME Nouvelle-Calédonie")
-    arome_polyn_grid = nwp_by_name.get("AROME Polynésie")
-    wrf_smn_grid = nwp_by_name.get("WRF-SMN")
-    icon_eu_grid = nwp_by_name.get("ICON-EU")
-    dmi_dini_grid = nwp_by_name.get("DMI DINI")
-    ecmwf_grid = nwp_by_name.get("ECMWF IFS")
+    nwp_grids_by_slug: dict[str, object] = {
+        nwp_grid_slug(c): c.instance for c in nwp_contribs
+    }
+    # IFS is still special-cased by the radar tile arrow path and the
+    # tile warmer; pull it out by slug for those consumers.  Everything
+    # else flows through ``nwp_chain`` / ``nwp_grids_by_slug``.
+    ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
     nwp_chain = NWPChain([c.instance for c in nwp_contribs])
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
     cloud = CloudGrid() if settings.satellite_enabled else None
@@ -495,18 +444,8 @@ async def lifespan(app: FastAPI):
     # Wire up the shared state
     routes.frame_store = store
     routes.tile_cache = cache
+    routes.nwp_grids = nwp_grids_by_slug
     routes.ecmwf_grid = ecmwf_grid
-    routes.hrrr_grid = hrrr_grid
-    routes.hrrr_alaska_grid = hrrr_alaska_grid
-    routes.hrdps_grid = hrdps_grid
-    routes.arome_antilles_grid = arome_antilles_grid
-    routes.arome_guyane_grid = arome_guyane_grid
-    routes.arome_indien_grid = arome_indien_grid
-    routes.arome_ncaled_grid = arome_ncaled_grid
-    routes.arome_polyn_grid = arome_polyn_grid
-    routes.wrf_smn_grid = wrf_smn_grid
-    routes.icon_eu_grid = icon_eu_grid
-    routes.dmi_dini_grid = dmi_dini_grid
     routes.nwp_chain = nwp_chain
     routes.cloud_grid = cloud
     routes.tile_warmer = warmer
@@ -537,18 +476,7 @@ async def lifespan(app: FastAPI):
 
     fetcher = RadarFetcher(
         store, cache,
-        ecmwf_grid=ecmwf_grid,
-        hrrr_grid=hrrr_grid,
-        hrrr_alaska_grid=hrrr_alaska_grid,
-        hrdps_grid=hrdps_grid,
-        arome_antilles_grid=arome_antilles_grid,
-        arome_guyane_grid=arome_guyane_grid,
-        arome_indien_grid=arome_indien_grid,
-        arome_ncaled_grid=arome_ncaled_grid,
-        arome_polyn_grid=arome_polyn_grid,
-        wrf_smn_grid=wrf_smn_grid,
-        icon_eu_grid=icon_eu_grid,
-        dmi_dini_grid=dmi_dini_grid,
+        nwp_contributions=nwp_contribs,
         cloud_grid=cloud,
         nowcast_generator=nowcast_generator,
         warmer=warmer,

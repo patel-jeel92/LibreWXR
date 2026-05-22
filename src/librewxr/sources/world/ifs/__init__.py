@@ -26,4 +26,6 @@ def nwp_provider(settings, cache_dir) -> NWPContribution | None:
         instance=ECMWFGrid(cache_dir=cache_dir),
         priority=1000,
         name="ECMWF IFS",
+        # Legacy snapshot key — auto-slug would produce ``ecmwf_ifs_grid``.
+        slug="ecmwf_grid",
     )

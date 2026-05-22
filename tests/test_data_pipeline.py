@@ -80,16 +80,13 @@ def test_pipeline_writes_state_json_via_hook(tmp_path, monkeypatch):
         # the dump path the on_cycle_complete hook calls.
         from librewxr.data.master_state import dump_state
 
+        # All per-source grid entries are None here — dump_state should
+        # skip them, mirroring what the pipeline does when those sources
+        # are disabled by config.  The slug shape is still arbitrary;
+        # what matters is that the test treats them all as opt-out.
         stores = {
             "frame_store": store,
             "ecmwf_grid": None,
-            "hrrr_grid": None,
-            "hrrr_alaska_grid": None,
-            "hrdps_grid": None,
-            "arome_antilles_grid": None,
-            "wrf_smn_grid": None,
-            "icon_eu_grid": None,
-            "dmi_dini_grid": None,
             "cloud_grid": None,
             "nowcast_store": None,
         }

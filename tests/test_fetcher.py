@@ -167,7 +167,7 @@ def _build_fetcher(store, tile_cache, radar_cache, region):
     fetcher = RadarFetcher.__new__(RadarFetcher)
     fetcher._store = store
     fetcher._cache = tile_cache
-    fetcher._ecmwf_grid = None
+    fetcher._nwp_contributions = []
     fetcher._cloud_grid = None
     fetcher._nowcast_generator = None
     fetcher._warmer = None

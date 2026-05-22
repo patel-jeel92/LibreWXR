@@ -13,18 +13,6 @@ from librewxr.config import settings
 from librewxr.memory import release_memory
 from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.regions import REGIONS, RegionDef
-from librewxr.sources.world.ifs import ECMWFGrid
-from librewxr.sources.regional.africa.nwp.arome_indien import AROMEIndienGrid
-from librewxr.sources.regional.caribbean.nwp.arome_antilles import AROMEAntillesGrid
-from librewxr.sources.regional.europe.nwp.dmi_dini import DMIDiniGrid
-from librewxr.sources.regional.europe.nwp.icon_eu import ICONEUGrid
-from librewxr.sources.regional.north_america.canada.nwp.hrdps import HRDPSGrid
-from librewxr.sources.regional.north_america.usa.nwp.hrrr import HRRRGrid
-from librewxr.sources.regional.north_america.usa.nwp.hrrr_alaska import HRRRAlaskaGrid
-from librewxr.sources.regional.oceania.nwp.arome_ncaled import AROMENCaledGrid
-from librewxr.sources.regional.oceania.nwp.arome_polyn import AROMEPolynGrid
-from librewxr.sources.regional.south_america.nwp.arome_guyane import AROMEGuyaneGrid
-from librewxr.sources.regional.south_america.nwp.wrf_smn import WRFSMNGrid
 # Cross-source policy stays in this file (the discovery walker
 # populates ``self._sources`` but blending and fallback still belong
 # here).  MRMS contributes ``MRMS_EXTENTS["USCOMP"]`` for the CACOMP
@@ -41,6 +29,7 @@ from librewxr.sources.regional.north_america.usa.radar.mrms import (
 )
 from librewxr.data.store import FrameStore, RadarFrame
 from librewxr.sources import RADAR_PROVIDERS
+from librewxr.sources._base import NWPContribution
 from librewxr.tiles.cache import TileCache
 
 logger = logging.getLogger(__name__)
@@ -58,18 +47,7 @@ class RadarFetcher:
         self,
         store: FrameStore,
         cache: TileCache,
-        ecmwf_grid: ECMWFGrid | None = None,
-        hrrr_grid: HRRRGrid | None = None,
-        hrrr_alaska_grid: HRRRAlaskaGrid | None = None,
-        hrdps_grid: HRDPSGrid | None = None,
-        arome_antilles_grid: AROMEAntillesGrid | None = None,
-        arome_guyane_grid: AROMEGuyaneGrid | None = None,
-        arome_indien_grid: AROMEIndienGrid | None = None,
-        arome_ncaled_grid: AROMENCaledGrid | None = None,
-        arome_polyn_grid: AROMEPolynGrid | None = None,
-        wrf_smn_grid: WRFSMNGrid | None = None,
-        icon_eu_grid: ICONEUGrid | None = None,
-        dmi_dini_grid: DMIDiniGrid | None = None,
+        nwp_contributions: list[NWPContribution] | None = None,
         cloud_grid: CloudGrid | None = None,
         nowcast_generator=None,
         warmer=None,
@@ -78,18 +56,16 @@ class RadarFetcher:
     ):
         self._store = store
         self._cache = cache
-        self._ecmwf_grid = ecmwf_grid
-        self._hrrr_grid = hrrr_grid
-        self._hrrr_alaska_grid = hrrr_alaska_grid
-        self._hrdps_grid = hrdps_grid
-        self._arome_antilles_grid = arome_antilles_grid
-        self._arome_guyane_grid = arome_guyane_grid
-        self._arome_indien_grid = arome_indien_grid
-        self._arome_ncaled_grid = arome_ncaled_grid
-        self._arome_polyn_grid = arome_polyn_grid
-        self._wrf_smn_grid = wrf_smn_grid
-        self._icon_eu_grid = icon_eu_grid
-        self._dmi_dini_grid = dmi_dini_grid
+        # Every enabled NWP source flows through ``nwp_contributions``;
+        # the dispatch loop in ``_fetch_auxiliary_grids`` and the
+        # shutdown loop in ``close()`` iterate this list, so adding a
+        # new NWP source needs no edits here.  ``inspect.signature`` is
+        # used at call time to decide whether to pass
+        # ``history_seconds``/``horizon_seconds`` — IFS's fetch takes
+        # neither, every other grid takes both.
+        self._nwp_contributions: list[NWPContribution] = list(
+            nwp_contributions or []
+        )
         self._cloud_grid = cloud_grid
         self._nowcast_generator = nowcast_generator
         self._warmer = warmer
@@ -210,30 +186,11 @@ class RadarFetcher:
         if self._cacomp_msc_source and id(self._cacomp_msc_source) not in closed:
             await self._cacomp_msc_source.close()
             closed.add(id(self._cacomp_msc_source))
-        if self._ecmwf_grid:
-            await self._ecmwf_grid.close()
-        if self._hrrr_grid:
-            await self._hrrr_grid.close()
-        if self._hrrr_alaska_grid:
-            await self._hrrr_alaska_grid.close()
-        if self._hrdps_grid:
-            await self._hrdps_grid.close()
-        if self._arome_antilles_grid:
-            await self._arome_antilles_grid.close()
-        if self._arome_guyane_grid:
-            await self._arome_guyane_grid.close()
-        if self._arome_indien_grid:
-            await self._arome_indien_grid.close()
-        if self._arome_ncaled_grid:
-            await self._arome_ncaled_grid.close()
-        if self._arome_polyn_grid:
-            await self._arome_polyn_grid.close()
-        if self._wrf_smn_grid:
-            await self._wrf_smn_grid.close()
-        if self._icon_eu_grid:
-            await self._icon_eu_grid.close()
-        if self._dmi_dini_grid:
-            await self._dmi_dini_grid.close()
+        for contrib in self._nwp_contributions:
+            try:
+                await contrib.instance.close()
+            except Exception:
+                logger.exception("Error closing %s", contrib.name)
         logger.info("Radar fetcher stopped")
 
     async def _backfill_then_loop(self) -> None:
@@ -343,80 +300,29 @@ class RadarFetcher:
         nwp_horizon = settings.nowcast_frames * settings.fetch_interval
         nwp_history = settings.max_frames * settings.fetch_interval
 
-        # (label, grid, kwargs, failure-message) tuples.  Each entry runs
-        # under the semaphore independently, so a slow source never holds
-        # back another finishing.
+        # Build (label, grid, kwargs, failure-message) tuples for every
+        # active NWP contribution.  ``inspect.signature`` decides whether
+        # to pass ``history_seconds``/``horizon_seconds`` — IFS doesn't
+        # accept either, every other grid does.  Each entry runs under
+        # the semaphore independently so a slow source never holds back
+        # another finishing.
         grid_specs: list[tuple[str, object, dict, str]] = []
-        if self._ecmwf_grid is not None:
+        for contrib in self._nwp_contributions:
+            grid = contrib.instance
+            try:
+                sig = inspect.signature(grid.fetch)
+            except (TypeError, ValueError):
+                sig = None
+            kwargs: dict = {}
+            if sig is not None and "history_seconds" in sig.parameters:
+                kwargs["history_seconds"] = nwp_history
+            if sig is not None and "horizon_seconds" in sig.parameters:
+                kwargs["horizon_seconds"] = nwp_horizon
             grid_specs.append((
-                "ECMWF IFS", self._ecmwf_grid, {},
-                "ECMWF IFS fetch failed, global fallback may be stale",
-            ))
-        if self._hrrr_grid is not None:
-            grid_specs.append((
-                "HRRR", self._hrrr_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "HRRR fetch failed, CONUS NWP layer may be stale",
-            ))
-        if self._hrrr_alaska_grid is not None:
-            grid_specs.append((
-                "HRRR-Alaska", self._hrrr_alaska_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "HRRR-Alaska fetch failed, AK NWP layer may be stale",
-            ))
-        if self._hrdps_grid is not None:
-            grid_specs.append((
-                "HRDPS", self._hrdps_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "HRDPS fetch failed, Canada NWP layer may be stale",
-            ))
-        if self._arome_antilles_grid is not None:
-            grid_specs.append((
-                "AROME Antilles", self._arome_antilles_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "AROME Antilles fetch failed, Caribbean NWP layer may be stale",
-            ))
-        if self._arome_guyane_grid is not None:
-            grid_specs.append((
-                "AROME Guyane", self._arome_guyane_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "AROME Guyane fetch failed, French Guiana NWP layer may be stale",
-            ))
-        if self._arome_indien_grid is not None:
-            grid_specs.append((
-                "AROME Indien", self._arome_indien_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "AROME Indien fetch failed, SW Indian Ocean NWP layer may be stale",
-            ))
-        if self._arome_ncaled_grid is not None:
-            grid_specs.append((
-                "AROME Nouvelle-Calédonie", self._arome_ncaled_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "AROME Nouvelle-Calédonie fetch failed, SW Pacific NWP layer may be stale",
-            ))
-        if self._arome_polyn_grid is not None:
-            grid_specs.append((
-                "AROME Polynésie", self._arome_polyn_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "AROME Polynésie fetch failed, S Pacific NWP layer may be stale",
-            ))
-        if self._wrf_smn_grid is not None:
-            grid_specs.append((
-                "WRF-SMN", self._wrf_smn_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "WRF-SMN fetch failed, S. America NWP layer may be stale",
-            ))
-        if self._icon_eu_grid is not None:
-            grid_specs.append((
-                "ICON-EU", self._icon_eu_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "ICON-EU fetch failed, EU NWP layer may be stale",
-            ))
-        if self._dmi_dini_grid is not None:
-            grid_specs.append((
-                "DMI DINI", self._dmi_dini_grid,
-                {"history_seconds": nwp_history, "horizon_seconds": nwp_horizon},
-                "DMI DINI fetch failed, NW Europe NWP layer may be stale",
+                contrib.name,
+                grid,
+                kwargs,
+                f"{contrib.name} fetch failed, NWP layer may be stale",
             ))
 
         if grid_specs:

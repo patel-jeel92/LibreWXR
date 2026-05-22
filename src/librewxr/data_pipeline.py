@@ -43,6 +43,7 @@ from librewxr.data.store import FrameStore
 from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
+    nwp_grid_slug,
 )
 from librewxr.tiles.cache import TileCache
 
@@ -121,19 +122,7 @@ async def run_pipeline() -> None:
     # off).  Same chain order as ``main.py`` — see that module for the
     # priority assignments.
     nwp_contribs = collect_nwp_contributions(settings, cache_dir)
-    nwp_by_name = {c.name: c.instance for c in nwp_contribs}
-    hrrr_grid = nwp_by_name.get("HRRR")
-    hrrr_alaska_grid = nwp_by_name.get("HRRR-Alaska")
-    hrdps_grid = nwp_by_name.get("HRDPS")
-    arome_antilles_grid = nwp_by_name.get("AROME Antilles")
-    arome_guyane_grid = nwp_by_name.get("AROME Guyane")
-    arome_indien_grid = nwp_by_name.get("AROME Indien")
-    arome_ncaled_grid = nwp_by_name.get("AROME Nouvelle-Calédonie")
-    arome_polyn_grid = nwp_by_name.get("AROME Polynésie")
-    wrf_smn_grid = nwp_by_name.get("WRF-SMN")
-    icon_eu_grid = nwp_by_name.get("ICON-EU")
-    dmi_dini_grid = nwp_by_name.get("DMI DINI")
-    ecmwf_grid = nwp_by_name.get("ECMWF IFS")
+    nwp_grids_by_slug = {nwp_grid_slug(c): c.instance for c in nwp_contribs}
     nwp_chain = NWPChain([c.instance for c in nwp_contribs])
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
 
@@ -171,22 +160,11 @@ async def run_pipeline() -> None:
     # via apply_state instead.
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
-    # Stores keyed by the same names master_state expects.  None entries
-    # are skipped by dump_state.
+    # Stores keyed by slug — render-only workers consume the same keys
+    # via ``apply_state``.  None entries are skipped by dump_state.
     stores = {
         "frame_store": store,
-        "ecmwf_grid": ecmwf_grid,
-        "hrrr_grid": hrrr_grid,
-        "hrrr_alaska_grid": hrrr_alaska_grid,
-        "hrdps_grid": hrdps_grid,
-        "arome_antilles_grid": arome_antilles_grid,
-        "arome_guyane_grid": arome_guyane_grid,
-        "arome_indien_grid": arome_indien_grid,
-        "arome_ncaled_grid": arome_ncaled_grid,
-        "arome_polyn_grid": arome_polyn_grid,
-        "wrf_smn_grid": wrf_smn_grid,
-        "icon_eu_grid": icon_eu_grid,
-        "dmi_dini_grid": dmi_dini_grid,
+        **nwp_grids_by_slug,
         "cloud_grid": cloud_grid,
         "nowcast_store": nowcast_store,
         "alerts_store": alerts_store,
@@ -200,18 +178,7 @@ async def run_pipeline() -> None:
 
     fetcher = RadarFetcher(
         store, tile_cache,
-        ecmwf_grid=ecmwf_grid,
-        hrrr_grid=hrrr_grid,
-        hrrr_alaska_grid=hrrr_alaska_grid,
-        hrdps_grid=hrdps_grid,
-        arome_antilles_grid=arome_antilles_grid,
-        arome_guyane_grid=arome_guyane_grid,
-        arome_indien_grid=arome_indien_grid,
-        arome_ncaled_grid=arome_ncaled_grid,
-        arome_polyn_grid=arome_polyn_grid,
-        wrf_smn_grid=wrf_smn_grid,
-        icon_eu_grid=icon_eu_grid,
-        dmi_dini_grid=dmi_dini_grid,
+        nwp_contributions=nwp_contribs,
         cloud_grid=cloud_grid,
         nowcast_generator=nowcast_generator,
         warmer=None,  # tile warming is the render workers' job

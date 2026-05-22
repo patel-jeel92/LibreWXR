@@ -37,18 +37,14 @@ router = APIRouter()
 # These get set by main.py during startup
 frame_store: FrameStore | None = None
 tile_cache: TileCache | None = None
-ecmwf_grid = None  # ECMWFGrid | None
-hrrr_grid = None  # HRRRGrid | None
-hrrr_alaska_grid = None  # HRRRAlaskaGrid | None
-hrdps_grid = None  # HRDPSGrid | None
-arome_antilles_grid = None  # AROMEAntillesGrid | None
-arome_guyane_grid = None  # AROMEGuyaneGrid | None
-arome_indien_grid = None  # AROMEIndienGrid | None
-arome_ncaled_grid = None  # AROMENCaledGrid | None
-arome_polyn_grid = None  # AROMEPolynGrid | None
-wrf_smn_grid = None  # WRFSMNGrid | None
-icon_eu_grid = None  # ICONEUGrid | None
-dmi_dini_grid = None  # DMIDiniGrid | None
+# All NWP grids live in a single dict keyed by slug
+# (``hrrr_grid``, ``arome_antilles_grid``, ``ecmwf_grid``, etc.) —
+# generated from ``NWPContribution.name`` via ``nwp_grid_slug``.  The
+# ``/health`` endpoint iterates this dict so adding a new NWP source
+# requires no edits here.  ``ecmwf_grid`` is also bound as an attribute
+# below for the radar tile arrow path that still treats IFS specially.
+nwp_grids: dict[str, object] = {}
+ecmwf_grid = None  # ECMWFGrid | None — special-cased by /v2/radar arrows
 nwp_chain = None  # NWPChain | None
 cloud_grid = None  # CloudGrid | None
 tile_warmer = None  # TileWarmer | None
@@ -68,6 +64,35 @@ alerts_enabled: bool = False
 _nws_point_cache: dict[tuple[float, float], tuple[float, list[GeoJSONFeature]]] = {}
 _NWS_CACHE_TTL = 300  # 5 minutes
 _NWS_API_URL = "https://api.weather.gov/alerts/active"
+
+
+def _nwp_grid_health_blocks() -> dict[str, dict]:
+    """Build per-grid ``/health`` blocks for every entry in ``nwp_grids``.
+
+    IFS reports a different shape (``reference_time`` + ``timesteps``)
+    than the chain-source grids (``latest_run`` + ``frames``).  Detect
+    by attribute presence rather than slug — keeps the shape stable if
+    a future provider adopts either pattern.
+    """
+    blocks: dict[str, dict] = {}
+    for slug, grid in nwp_grids.items():
+        if grid is None:
+            blocks[slug] = {"enabled": False, "loaded": False}
+            continue
+        if hasattr(grid, "reference_time") and hasattr(grid, "timestep_count"):
+            blocks[slug] = {
+                "loaded": getattr(grid, "data", None) is not None,
+                "reference_time": grid.reference_time,
+                "timesteps": grid.timestep_count,
+            }
+        else:
+            blocks[slug] = {
+                "enabled": True,
+                "loaded": grid.has_data(),
+                "latest_run": grid.latest_run_iso,
+                "frames": grid.frame_count,
+            }
+    return blocks
 
 
 @router.get("/health")
@@ -94,32 +119,37 @@ async def health():
     for name in (enabled_regions or []):
         per_region_counts.setdefault(name, 0)
 
-    # Per-component memory breakdown
+    # Per-component memory breakdown.  Every NWP grid is iterated from
+    # ``nwp_grids``; the per-slug byte counts are folded into both
+    # ``tracked_bytes`` and the ``breakdown`` dict below so adding a new
+    # NWP source requires no edits here.
     radar_bytes = frame_store.data_bytes
     tile_cache_bytes = tile_cache.total_bytes
-    ecmwf_bytes = ecmwf_grid.data_bytes if ecmwf_grid else 0
-    hrrr_bytes = hrrr_grid.data_bytes if hrrr_grid else 0
-    hrrr_alaska_bytes = hrrr_alaska_grid.data_bytes if hrrr_alaska_grid else 0
-    hrdps_bytes = hrdps_grid.data_bytes if hrdps_grid else 0
-    arome_antilles_bytes = arome_antilles_grid.data_bytes if arome_antilles_grid else 0
-    arome_guyane_bytes = arome_guyane_grid.data_bytes if arome_guyane_grid else 0
-    arome_indien_bytes = arome_indien_grid.data_bytes if arome_indien_grid else 0
-    arome_ncaled_bytes = arome_ncaled_grid.data_bytes if arome_ncaled_grid else 0
-    arome_polyn_bytes = arome_polyn_grid.data_bytes if arome_polyn_grid else 0
-    wrf_smn_bytes = wrf_smn_grid.data_bytes if wrf_smn_grid else 0
-    icon_eu_bytes = icon_eu_grid.data_bytes if icon_eu_grid else 0
-    dmi_dini_bytes = dmi_dini_grid.data_bytes if dmi_dini_grid else 0
+    nwp_bytes_by_slug: dict[str, int] = {
+        slug: (grid.data_bytes if grid is not None else 0)
+        for slug, grid in nwp_grids.items()
+    }
     nowcast_bytes = nowcast_store.data_bytes if nowcast_store else 0
     satellite_bytes = cloud_grid.data_bytes if cloud_grid else 0
     coord_bytes = coord_cache_bytes()
     tracked_bytes = (
-        radar_bytes + tile_cache_bytes + ecmwf_bytes + hrrr_bytes + hrdps_bytes
-        + arome_antilles_bytes + arome_guyane_bytes + arome_indien_bytes
-        + arome_ncaled_bytes + arome_polyn_bytes
-        + wrf_smn_bytes + icon_eu_bytes + dmi_dini_bytes
+        radar_bytes + tile_cache_bytes + sum(nwp_bytes_by_slug.values())
         + nowcast_bytes + satellite_bytes + coord_bytes
     )
     other_bytes = max(0, rss_bytes - tracked_bytes)
+
+    breakdown = {
+        "radar_frames_mb": round(radar_bytes / (1024 * 1024), 1),
+        "tile_cache_mb": round(tile_cache_bytes / (1024 * 1024), 1),
+    }
+    for slug, nbytes in nwp_bytes_by_slug.items():
+        breakdown[f"{slug}_mb"] = round(nbytes / (1024 * 1024), 1)
+    breakdown.update({
+        "nowcast_mb": round(nowcast_bytes / (1024 * 1024), 1),
+        "satellite_mb": round(satellite_bytes / (1024 * 1024), 1),
+        "coord_caches_mb": round(coord_bytes / (1024 * 1024), 1),
+        "other_mb": round(other_bytes / (1024 * 1024), 1),
+    })
 
     return {
         "status": "ok" if frame_count > 0 else "degraded",
@@ -128,26 +158,7 @@ async def health():
             "resident_mb": round(rss_mb, 1),
             "limit_mb": round(mem_limit_mb, 1),
             "usage_pct": ram_usage,
-            "breakdown": {
-                "radar_frames_mb": round(radar_bytes / (1024 * 1024), 1),
-                "tile_cache_mb": round(tile_cache_bytes / (1024 * 1024), 1),
-                "ecmwf_grid_mb": round(ecmwf_bytes / (1024 * 1024), 1),
-                "hrrr_grid_mb": round(hrrr_bytes / (1024 * 1024), 1),
-                "hrrr_alaska_grid_mb": round(hrrr_alaska_bytes / (1024 * 1024), 1),
-                "hrdps_grid_mb": round(hrdps_bytes / (1024 * 1024), 1),
-                "arome_antilles_grid_mb": round(arome_antilles_bytes / (1024 * 1024), 1),
-                "arome_guyane_grid_mb": round(arome_guyane_bytes / (1024 * 1024), 1),
-                "arome_indien_grid_mb": round(arome_indien_bytes / (1024 * 1024), 1),
-                "arome_ncaled_grid_mb": round(arome_ncaled_bytes / (1024 * 1024), 1),
-                "arome_polyn_grid_mb": round(arome_polyn_bytes / (1024 * 1024), 1),
-                "wrf_smn_grid_mb": round(wrf_smn_bytes / (1024 * 1024), 1),
-                "icon_eu_grid_mb": round(icon_eu_bytes / (1024 * 1024), 1),
-                "dmi_dini_grid_mb": round(dmi_dini_bytes / (1024 * 1024), 1),
-                "nowcast_mb": round(nowcast_bytes / (1024 * 1024), 1),
-                "satellite_mb": round(satellite_bytes / (1024 * 1024), 1),
-                "coord_caches_mb": round(coord_bytes / (1024 * 1024), 1),
-                "other_mb": round(other_bytes / (1024 * 1024), 1),
-            },
+            "breakdown": breakdown,
         },
         "frames": {
             "count": frame_count,
@@ -162,77 +173,7 @@ async def health():
             "used_mb": round(tile_cache.total_bytes / (1024 * 1024), 1),
             "max_mb": settings.tile_cache_mb,
         },
-        "ecmwf_grid": {
-            "loaded": ecmwf_grid is not None and ecmwf_grid.data is not None,
-            "reference_time": ecmwf_grid.reference_time if ecmwf_grid else None,
-            "timesteps": ecmwf_grid.timestep_count if ecmwf_grid else 0,
-        },
-        "hrrr_grid": {
-            "enabled": hrrr_grid is not None,
-            "loaded": hrrr_grid is not None and hrrr_grid.has_data(),
-            "latest_run": hrrr_grid.latest_run_iso if hrrr_grid else None,
-            "frames": hrrr_grid.frame_count if hrrr_grid else 0,
-        },
-        "hrrr_alaska_grid": {
-            "enabled": hrrr_alaska_grid is not None,
-            "loaded": hrrr_alaska_grid is not None and hrrr_alaska_grid.has_data(),
-            "latest_run": hrrr_alaska_grid.latest_run_iso if hrrr_alaska_grid else None,
-            "frames": hrrr_alaska_grid.frame_count if hrrr_alaska_grid else 0,
-        },
-        "hrdps_grid": {
-            "enabled": hrdps_grid is not None,
-            "loaded": hrdps_grid is not None and hrdps_grid.has_data(),
-            "latest_run": hrdps_grid.latest_run_iso if hrdps_grid else None,
-            "frames": hrdps_grid.frame_count if hrdps_grid else 0,
-        },
-        "arome_antilles_grid": {
-            "enabled": arome_antilles_grid is not None,
-            "loaded": arome_antilles_grid is not None and arome_antilles_grid.has_data(),
-            "latest_run": arome_antilles_grid.latest_run_iso if arome_antilles_grid else None,
-            "frames": arome_antilles_grid.frame_count if arome_antilles_grid else 0,
-        },
-        "arome_guyane_grid": {
-            "enabled": arome_guyane_grid is not None,
-            "loaded": arome_guyane_grid is not None and arome_guyane_grid.has_data(),
-            "latest_run": arome_guyane_grid.latest_run_iso if arome_guyane_grid else None,
-            "frames": arome_guyane_grid.frame_count if arome_guyane_grid else 0,
-        },
-        "arome_indien_grid": {
-            "enabled": arome_indien_grid is not None,
-            "loaded": arome_indien_grid is not None and arome_indien_grid.has_data(),
-            "latest_run": arome_indien_grid.latest_run_iso if arome_indien_grid else None,
-            "frames": arome_indien_grid.frame_count if arome_indien_grid else 0,
-        },
-        "arome_ncaled_grid": {
-            "enabled": arome_ncaled_grid is not None,
-            "loaded": arome_ncaled_grid is not None and arome_ncaled_grid.has_data(),
-            "latest_run": arome_ncaled_grid.latest_run_iso if arome_ncaled_grid else None,
-            "frames": arome_ncaled_grid.frame_count if arome_ncaled_grid else 0,
-        },
-        "arome_polyn_grid": {
-            "enabled": arome_polyn_grid is not None,
-            "loaded": arome_polyn_grid is not None and arome_polyn_grid.has_data(),
-            "latest_run": arome_polyn_grid.latest_run_iso if arome_polyn_grid else None,
-            "frames": arome_polyn_grid.frame_count if arome_polyn_grid else 0,
-        },
-        "wrf_smn_grid": {
-            "enabled": wrf_smn_grid is not None,
-            "loaded": wrf_smn_grid is not None and wrf_smn_grid.has_data(),
-            "latest_run": wrf_smn_grid.latest_run_iso if wrf_smn_grid else None,
-            "frames": wrf_smn_grid.frame_count if wrf_smn_grid else 0,
-        },
-        "icon_eu_grid": {
-            "enabled": icon_eu_grid is not None,
-            "loaded": icon_eu_grid is not None and icon_eu_grid.has_data(),
-            "latest_run": icon_eu_grid.latest_run_iso if icon_eu_grid else None,
-            "frames": icon_eu_grid.frame_count if icon_eu_grid else 0,
-        },
-        "dmi_dini_grid": {
-            "enabled": dmi_dini_grid is not None,
-            "loaded": dmi_dini_grid is not None and dmi_dini_grid.has_data(),
-            "latest_run": dmi_dini_grid.latest_run_iso if dmi_dini_grid else None,
-            "frames": dmi_dini_grid.frame_count if dmi_dini_grid else 0,
-        },
+        **_nwp_grid_health_blocks(),
         "nwp_chain": {
             "sources": [s.name for s in nwp_chain.sources] if nwp_chain else [],
         },

@@ -278,22 +278,49 @@ def nwp_provider(settings, cache_dir) -> NWPContribution | None:
     )
 ```
 
+The `name` doubles as the source's identity in `/health` and in the
+cross-process snapshot — it's auto-slugged to a key like
+`zqr_wrf_grid` (lowercase, non-word chars → `_`, plus `_grid`). If
+your display name doesn't slug cleanly (non-ASCII characters,
+abbreviations like "NCaled" for "Nouvelle-Calédonie"), pass an
+explicit `slug="…_grid"` field so the snapshot key stays stable:
+
+```python
+return NWPContribution(
+    instance=ZQRWRFGrid(cache_dir=cache_dir),
+    priority=35,
+    name="ZQR-WRF Réunion",       # non-ASCII; auto-slug would mangle the é
+    slug="zqr_wrf_reunion_grid",  # explicit key for /health + state.json
+)
+```
+
+The fetcher dispatch in `data/fetcher.py` calls every grid's `fetch()`
+under a shared semaphore. It uses `inspect.signature` to decide whether
+to pass `history_seconds` and `horizon_seconds` — if your grid's
+`fetch()` accepts those kwargs (the common case), they're passed; if
+it takes no kwargs (like IFS), nothing is passed. No registration step
+is needed for either shape.
+
 ### Priority numbers
 
 `priority` controls position in the `NWPChain`: **lower numbers run first**, so narrower / higher-resolution domains should pick smaller numbers. The chain dispatcher fills pixels from the first source whose `feather_mask` is positive, falling through to the next source where the previous one's feather is zero.
 
 Current assignments:
 
-| Source         | Priority | Notes                                              |
-|----------------|----------|----------------------------------------------------|
-| HRRR           | 10       | 3 km CONUS, narrowest domain                       |
-| HRRR-Alaska    | 11       | Same model, disjoint domain                        |
-| HRDPS          | 20       | 2.5 km Canada                                      |
-| AROME Antilles | 25       | 2.5 km Caribbean                                   |
-| DMI DINI       | 30       | 2 km Nordic / NW Europe                            |
-| ICON-EU        | 35       | 7 km Europe (catches what DMI DINI doesn't)        |
-| WRF-SMN        | 40       | 4 km Southern Cone                                 |
-| **IFS**        | **1000** | Global catch-all                                   |
+| Source                   | Priority | Notes                                              |
+|--------------------------|----------|----------------------------------------------------|
+| HRRR                     | 10       | 3 km CONUS, narrowest domain                       |
+| HRRR-Alaska              | 11       | Same model, disjoint domain                        |
+| HRDPS                    | 20       | 2.5 km Canada                                      |
+| AROME Antilles           | 25       | 2.5 km Caribbean (FR-GP + MQ)                      |
+| AROME Guyane             | 26       | 2.5 km French Guiana                               |
+| AROME Indien             | 27       | 2.5 km SW Indian Ocean (RE + YT + KM + MG + SW)    |
+| AROME Nouvelle-Calédonie | 28       | 2.5 km SW Pacific (NC + VU)                        |
+| AROME Polynésie          | 29       | 2.5 km French Polynesia                            |
+| DMI DINI                 | 30       | 2 km Nordic / NW Europe                            |
+| ICON-EU                  | 35       | 7 km Europe (catches what DMI DINI doesn't)        |
+| WRF-SMN                  | 40       | 4 km Southern Cone                                 |
+| **IFS**                  | **1000** | Global catch-all                                   |
 
 Pick a number that places your source in the right spot. If your source's domain is disjoint from every other regional, the exact number between 10 and 999 doesn't matter behaviorally — just keep it deterministic and self-documenting. If your source overlaps another regional, put it before or after based on which should win inside the overlap.
 

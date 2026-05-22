@@ -30,10 +30,33 @@ from __future__ import annotations
 import importlib
 import logging
 import pkgutil
+import re
 from collections.abc import Iterator
 from types import ModuleType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from librewxr.sources._base import NWPContribution
 
 logger = logging.getLogger(__name__)
+
+
+_SLUG_NONWORD = re.compile(r"\W+", re.UNICODE)
+
+
+def nwp_grid_slug(contribution: "NWPContribution") -> str:
+    """Return the snapshot / ``/health`` key for an NWP contribution.
+
+    Honors ``contribution.slug`` when set; otherwise derives a key from
+    ``contribution.name`` (lowercase, non-word characters collapsed to
+    underscores, ``_grid`` suffix).  The result is what ``stores`` dicts
+    in ``data_pipeline.py`` and ``main.py`` use as their per-grid key,
+    and what ``api/routes.py`` emits in the ``/health`` payload.
+    """
+    if contribution.slug:
+        return contribution.slug
+    base = _SLUG_NONWORD.sub("_", contribution.name.lower()).strip("_")
+    return f"{base}_grid"
 
 
 def iter_source_packages() -> Iterator[ModuleType]:

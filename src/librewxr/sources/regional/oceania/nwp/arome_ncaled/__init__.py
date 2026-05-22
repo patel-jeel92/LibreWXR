@@ -23,4 +23,6 @@ def nwp_provider(settings, cache_dir) -> NWPContribution | None:
         instance=AROMENCaledGrid(cache_dir=cache_dir),
         priority=28,
         name="AROME Nouvelle-Calédonie",
+        # Explicit abbreviation — auto-slug would mangle the accented é.
+        slug="arome_ncaled_grid",
     )
