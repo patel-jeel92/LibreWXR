@@ -25,14 +25,14 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 - **Optical flow interpolation** — hourly ECMWF IFS frames are interpolated to 10-minute steps using dense motion vectors, so global IFS coverage animates smoothly like real radar data instead of jumping hour-to-hour (configurable, enabled by default)
 - **Precipitation nowcasting (experimental)** — 60-minute short-range forecast by extrapolating recent radar forward using optical flow, with configurable blend mode: smooth radar-to-model blending (default), pure radar extrapolation (closest to Rain Viewer), or pure NWP forecast. The model side is taken from the active NWP chain — HRRR over CONUS, ICON-EU/DINI over Europe, WRF-SMN over the S. American Cone, IFS elsewhere. Beyond 60 minutes, always uses pure model. Quality varies by weather pattern — works best for steady, organized precipitation; less reliable for fast-developing convection
 - **Precipitation motion arrows** — optional Dark Sky-style arrows showing storm movement direction and speed, derived from optical flow. Available for both radar and ECMWF data globally. Supports light and dark styles for different map themes via `?arrows=light` or `?arrows=dark` query parameter
-- **IFS-derived satellite imagery** — global cloud cover tiles composited from ECMWF IFS high/mid/low cloud layers, approximating infrared satellite imagery. Up to 12 hours of hourly animation with persistent disk caching for instant restarts. Populates the Rain Viewer-compatible `satellite.infrared` endpoint
+- **Real satellite imagery (GMGSI composite)** — NOAA's hourly global mosaic (GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9, composited by NESDIS) ingested as longwave IR + visible channels and rendered as a VIS-over-LW composite with a natural day/night terminator crossfade. Day side shows continents and clouds as they appear from space; night side shows cold-cloud IR on a transparent basemap. Up to 12 hours of hourly animation with persistent disk caching. Populates the Rain Viewer-compatible `satellite.infrared` endpoint
 - **Weather alerts (WMO CAP)** — global weather alerts polled every 5 minutes from severeweather.wmo.int, with MeteoAlarm geocodes for European polygon resolution. Surfaced through a Rain Viewer-extension alerts API (`/v2/alerts/...`). Configurable via `LIBREWXR_ALERTS_ENABLED`
 - **Snow detection** — per-pixel snow/rain classification. Regional NWP sources classify natively from their own 2-metre temperature field (HRRR-CONUS, HRRR-Alaska, WRF-SMN, DMI DINI, ICON-EU); ECMWF IFS snowfall ratio fills everywhere else
 - **Noise filtering** — configurable dBZ noise floor and speckle removal
 - **Tile cache warming** — background pre-rendering for smooth animation playback
 - **Multi-worker tile-server split** — optional production deployment splits the data pipeline from a pool of render workers that share state via memmap files. Lets every core actually do work instead of being GIL-bound at one. Run with `docker-compose.multiworker.yml`
 - **Persistent disk cache** — radar / NWP / satellite / alerts data are cached to disk with atomic writes, surviving restarts and container recreation without re-downloading from upstream. Configurable via `LIBREWXR_CACHE_DIR` (required for multi-worker mode)
-- **Memory-efficient storage** — radar frames, NWP grids, cloud cover, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
+- **Memory-efficient storage** — radar frames, NWP grids, satellite frames, and nowcast data are all backed by memory-mapped files, letting the OS page cache manage physical RAM instead of pinning data on the heap. Pages are reclaimed under memory pressure and re-faulted on access
 - **Smart fetch optimization** — radar sources skip re-downloading frames already in memory (only ~1 of 12 frames is new each cycle), NWP models skip redundant S3 fetches when the model run hasn't changed, and parallel NWP fetches are concurrency-capped via `LIBREWXR_NWP_FETCH_CONCURRENCY` so peak transient RAM stays bounded
 - **Health endpoint** — `/health` for monitoring uptime, per-component memory breakdown, frame count, NWP chain status, alerts status, and cache state
 - **Fully configurable** — all tunable parameters exposed via environment variables
@@ -238,7 +238,7 @@ GET /v2/satellite/{timestamp}/{size}/{z}/{x}/{y}/0/0_0.{ext}
 | `z`, `x`, `y` | integers | Standard slippy map tile coordinates |
 | `ext` | `png`, `webp` | Image format |
 
-Returns IFS-derived cloud cover tiles that approximate infrared satellite imagery. High clouds render bright white, mid clouds light gray, low clouds darker gray. Global coverage with hourly updates.
+Returns real satellite imagery tiles backed by NOAA GMGSI. The endpoint serves a VIS-over-LW composite when both channels are loaded: the daytime side shows visible reflectance (continents, oceans, sunlit clouds) and the night side falls through to longwave IR (cold cloud tops on a transparent basemap). The terminator crossfade emerges naturally from the underlying reflectance field. Hourly cadence; global coverage between ±72.7° latitude.
 
 #### Coverage Tiles
 
@@ -306,15 +306,17 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_HRDPS_ENABLED` | `true` | ECCC HRDPS-Continental (Canada) |
 | `LIBREWXR_AROME_ANTILLES_ENABLED` | `true` | Météo-France AROME Antilles (eastern Caribbean) |
 | `LIBREWXR_WRF_SMN_ENABLED` | `true` | SMN Argentina WRF-DET (South American Cone) |
-| `LIBREWXR_ECMWF_ENABLED` | `true` | ECMWF IFS global precipitation + cloud (disable for regional-only debugging) |
+| `LIBREWXR_ECMWF_ENABLED` | `true` | ECMWF IFS global precipitation (disable for regional-only debugging) |
 | `LIBREWXR_NWP_FETCH_CONCURRENCY` | `4` | Max parallel NWP grid fetches per cycle |
 | **Nowcast** | | |
 | `LIBREWXR_NOWCAST_ENABLED` | `true` | Enable experimental precipitation nowcast |
 | `LIBREWXR_NOWCAST_FRAMES` | `6` | Number of nowcast frames (6 × 10 min = 60 min forecast) |
 | `LIBREWXR_NOWCAST_BLEND_MODE` | `blended` | `radar`, `blended`, or `model`. Beyond 60 min always uses pure model |
 | **Satellite + alerts** | | |
-| `LIBREWXR_SATELLITE_ENABLED` | `true` | Enable IFS-derived cloud cover tiles |
-| `LIBREWXR_SATELLITE_MAX_FRAMES` | `12` | Hourly IFS cloud timesteps to keep (12 = 12 hours) |
+| `LIBREWXR_SATELLITE_ENABLED` | `true` | Master switch for the GMGSI satellite layer (LW + VIS composite) |
+| `LIBREWXR_GMGSI_LW_ENABLED` | `true` | GMGSI longwave IR channel (24/7 base of the composite) |
+| `LIBREWXR_GMGSI_VIS_ENABLED` | `true` | GMGSI visible channel (daytime overlay) |
+| `LIBREWXR_SATELLITE_MAX_FRAMES` | `12` | Hourly satellite frames per channel to keep (12 = 12 hours) |
 | `LIBREWXR_ALERTS_ENABLED` | `true` | Enable WMO CAP weather alerts |
 | `LIBREWXR_ALERTS_FETCH_INTERVAL` | `300` | Alerts refresh interval in seconds |
 | **Tile rendering** | | |
@@ -332,7 +334,7 @@ the inline comments in [`src/librewxr/config.py`](src/librewxr/config.py).
 | `LIBREWXR_MEMORY_LIMIT_MB` | `0` | Memory limit in MB (0 = auto-detect from Docker/cgroup) |
 | `LIBREWXR_CACHE_DIR` | *(empty)* | Persistent cache directory. **Required** in multi-worker mode. Empty = in-memory only |
 | **Multi-worker tile-server split** | | |
-| `LIBREWXR_RENDER_ONLY` | `false` | When `1`, skip fetcher / NWP / cloud init and only render tiles from the snapshot |
+| `LIBREWXR_RENDER_ONLY` | `false` | When `1`, skip fetcher / NWP / satellite init and only render tiles from the snapshot |
 | `LIBREWXR_STATE_POLL_INTERVAL` | `1.0` | Seconds between state.json mtime polls in render-only mode |
 | `LIBREWXR_STATE_WAIT_TIMEOUT` | `300` | Seconds to wait for the first state.json on cold start (0 = forever) |
 
@@ -381,7 +383,7 @@ grows under real traffic as caches fill up.
 
 **RAM requirements (multi-worker mode):**
 
-Multi-worker mode shares the radar / NWP / cloud / alert state across
+Multi-worker mode shares the radar / NWP / satellite / alert state across
 all render workers via memmap, so adding workers doesn't multiply the
 data RAM — only the per-worker tile cache (default 64 MB) and Python
 interpreter overhead (~80 MB).
@@ -427,10 +429,10 @@ Tiles are served with `Cache-Control: public, max-age=300`, so any caching rever
 [ECMWF IFS]        ──┘   │                            │      (LRU cache + tile warmer)
                           │                            │
                           └─> [Optical Flow Interp] ───┤      [Satellite Tile Renderer]
-                              (hourly → 10-min)        │       (IR-like cloud tiles)
+                              (hourly → 10-min)        │       (VIS-over-LW composite)
                                                        │
-[Open-Meteo S3] ─> [IFS Cloud Cover] ─> [Disk Cache] ──┤
-   (high/mid/low)                       (atomic writes)│
+[NOAA GMGSI S3] ─> [LW + VIS frames] ──> [Disk Cache] ─┤
+   (hourly global mosaic)                (atomic writes)│
                                                        │
 [WMO CAP] ───────> [Alert Store] ──────────────────────┘
    (severeweather.wmo.int + MeteoAlarm geocodes)
@@ -490,8 +492,8 @@ rendering, and the HTTP server.
 ```
                        ┌────────────────────────────────────────┐
                        │   librewxr (one asyncio process)       │
-[radar / NWP / cloud   │                                        │
- / alerts upstreams] ──┼──> [Fetchers + memmap stores]          ├──> tiles + API
+[radar / NWP / sat /   │                                        │
+ alerts upstreams]   ──┼──> [Fetchers + memmap stores]          ├──> tiles + API
                        │            │                           │
                        │            └──> [Tile Renderer +       │
                        │                  uvicorn HTTP server]  │
@@ -518,7 +520,7 @@ per-worker tile cache and Python interpreter overhead.
 │   data-pipeline                        │    │   tile-server                          │
 │   (one asyncio process)                │    │   (N uvicorn workers,                  │
 │                                        │    │    LIBREWXR_RENDER_ONLY=1)             │
-│   [radar / NWP / cloud / alerts] ──┐   │    │                                        │
+│   [radar / NWP / sat / alerts]  ──┐    │    │                                        │
 │                                    │   │    │       ┌──> Worker 1 ─┐                 │
 │   [Fetchers] ──> [Memmap stores +  │   │    │       ├──> Worker 2 ─┤                 │
 │                   state.json       │   │    │       ├──> Worker 3 ─┼──> tiles + API  │
@@ -558,8 +560,8 @@ docker compose -f docker-compose.multiworker.yml up -d
   - **DWD ICON-EU** (~7 km, 3-hourly cycles) — DWD opendata, fills the European gaps DINI doesn't reach
   - **Météo-France AROME Antilles** (1.3 km native, 4 cycles/day) — anonymous via data.gouv.fr, covers the eastern Caribbean
   - **SMN Argentina WRF-DET** (4 km LCC, 4 cycles/day) — anonymous AWS Open Data, covers the South American Cone
-- **ECMWF IFS (global coverage):** native 9 km resolution via [Open-Meteo](https://open-meteo.com/) S3 — Marshall-Palmer Z-R conversion with snow/rain classification from snowfall ratio. Hourly frames optical-flow-interpolated to 10-min steps. Covers everywhere the regional NWP chain doesn't reach, and feeds both the precipitation animation and the satellite cloud layer.
-- **Satellite (IFS-derived):** cloud_cover_high/mid/low composited into IR-like cloud tiles. Persistent disk cache survives restarts; backfills from previous model runs.
+- **ECMWF IFS (global coverage):** native 9 km resolution via [Open-Meteo](https://open-meteo.com/) S3 — Marshall-Palmer Z-R conversion with snow/rain classification from snowfall ratio. Hourly frames optical-flow-interpolated to 10-min steps. Covers the precipitation layer everywhere the regional NWP chain doesn't reach.
+- **Satellite (NOAA GMGSI):** hourly global mosaic composited by NESDIS from GOES-East, GOES-West, Meteosat-9, Meteosat-10, and Himawari-9. Ingested as longwave IR + visible channels and rendered as a VIS-over-LW composite with natural day/night terminator. Persistent disk cache survives restarts.
 - **Weather alerts:** WMO CAP feed at severeweather.wmo.int (global) with MeteoAlarm geocodes for European polygon resolution. Updates every 5 minutes, surfaced through a Rain Viewer-extension alerts API.
 - **No external dependencies beyond pip** — no GDAL, rasterio, or system geo libraries needed.
 
@@ -633,7 +635,8 @@ LibreWXR uses the following freely available data:
 - **[EUMETNET OPERA](https://www.eumetnet.eu/activities/observations-programme/current-activities/opera/)** — Pan-European CIRRUS radar composite via [MeteoGate](https://meteogate.eu/) S3 (~155 radars, 24 countries, ODIM HDF5)
 - **[CWA QPESUMS](https://www.cwa.gov.tw/)** — Central Weather Administration of Taiwan, 7-radar composite reflectivity product `O-A0059-001` via the `cwaopendata` AWS bucket. Licensed under the [Open Government Data License v1.0](https://data.gov.tw/license) (資料來源：中央氣象署 / Source: Central Weather Administration, Taiwan).
 - **[MET Malaysia](https://www.met.gov.my/)** — Jabatan Meteorologi Malaysia, 12-radar national composite (CAPPI 1 km, Rainbow 5 / LEONARDO Germany GmbH processing) via anonymous HTTPS at `api.met.gov.my`. Licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) (Radar data © Jabatan Meteorologi Malaysia / METMalaysia).
-- **[ECMWF IFS](https://www.ecmwf.int/) via [Open-Meteo](https://open-meteo.com/)** — ECMWF IFS 9km global precipitation, snowfall, and cloud cover. The global base layer for precipitation animation, nowcast extrapolation outside the regional NWP chain, and the satellite cloud tiles (CC-BY-4.0, data provided by Open-Meteo.com)
+- **[ECMWF IFS](https://www.ecmwf.int/) via [Open-Meteo](https://open-meteo.com/)** — ECMWF IFS 9km global precipitation and snowfall. The global base layer for precipitation animation and nowcast extrapolation outside the regional NWP chain (CC-BY-4.0, data provided by Open-Meteo.com)
+- **[NOAA GMGSI](https://registry.opendata.aws/noaa-gmgsi/)** — Global Mosaic of Geostationary Satellite Imagery, composited by NESDIS from GOES-East, GOES-West, Meteosat-9, Meteosat-10, and Himawari-9. Anonymous AWS Open Data; hourly cadence; ±72.7° latitude coverage
 
 All sources are provided by government-funded institutions and are freely available for any use. ECMWF IFS data is provided by Open-Meteo under the [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/) license.
 
@@ -641,7 +644,7 @@ All sources are provided by government-funded institutions and are freely availa
 
 - **Limited radar coverage outside US / Canada / Europe / Central America / Taiwan / SE Asia** — real radar composites cover the US (CONUS, Alaska, Hawaii, Puerto Rico, Guam), Canada, El Salvador and its neighbours, Europe (via OPERA), Taiwan (CWA QPESUMS), and Malaysia + Borneo + Brunei + Singapore + N. Sumatra (MET Malaysia). Everywhere else uses the regional NWP chain on top of ECMWF IFS for the precipitation layer — that's a complete picture of global precipitation, but it's modelled output, not direct radar observation
 - **Experimental nowcasting** — precipitation nowcast uses optical flow extrapolation blended with ECMWF IFS, which works well for steady, organized precipitation but is less reliable for fast-developing convection, cell initiation/dissipation, or complex terrain effects
-- **Satellite is IFS-derived, not real imagery** — the satellite layer composites ECMWF IFS cloud cover fields rather than using actual satellite observations, so it reflects model output rather than real-time conditions. Update cadence is hourly (matching IFS), not the ~15-minute cadence of real geostationary satellites
+- **Satellite is hourly, not real-time** — GMGSI publishes one composite per hour with ~35 minutes of latency from observation. Native per-satellite feeds (GOES, Himawari, Meteosat) refresh every 5–15 minutes, but at the cost of seam-blending and reprojection work that GMGSI handles upstream. GMGSI also caps at ±72.7° latitude — the deep polar regions are out of frame
 
 ## License
 

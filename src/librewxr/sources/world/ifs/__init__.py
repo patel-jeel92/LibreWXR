@@ -28,4 +28,7 @@ def nwp_provider(settings, cache_dir) -> NWPContribution | None:
         name="ECMWF IFS",
         # Legacy snapshot key — auto-slug would produce ``ecmwf_ifs_grid``.
         slug="ecmwf_grid",
+        # IFS is the global base layer, not part of the regional chain,
+        # so the ``regional_nwp_enabled`` master switch never drops it.
+        regional=False,
     )

@@ -36,7 +36,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from librewxr.sources._base import NWPContribution
+    from librewxr.sources._base import NWPContribution, SatelliteContribution
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,21 @@ def nwp_grid_slug(contribution: "NWPContribution") -> str:
     underscores, ``_grid`` suffix).  The result is what ``stores`` dicts
     in ``data_pipeline.py`` and ``main.py`` use as their per-grid key,
     and what ``api/routes.py`` emits in the ``/health`` payload.
+    """
+    if contribution.slug:
+        return contribution.slug
+    base = _SLUG_NONWORD.sub("_", contribution.name.lower()).strip("_")
+    return f"{base}_grid"
+
+
+def satellite_source_slug(contribution: "SatelliteContribution") -> str:
+    """Return the snapshot / ``/health`` key for a satellite contribution.
+
+    Mirrors ``nwp_grid_slug``: honors ``contribution.slug`` when set,
+    otherwise lowercases ``contribution.name``, collapses non-word
+    characters to underscores, and suffixes ``_grid``.  Used by
+    ``data_pipeline.py`` and ``main.py`` as the satellite stores' key
+    in the cross-worker snapshot dict.
     """
     if contribution.slug:
         return contribution.slug
@@ -76,8 +91,8 @@ def iter_source_packages() -> Iterator[ModuleType]:
             logger.exception("Failed to import source package %s", module_info.name)
 
 
-def _collect_providers() -> tuple[list, list]:
-    radar, nwp = [], []
+def _collect_providers() -> tuple[list, list, list]:
+    radar, nwp, sat = [], [], []
     for mod in iter_source_packages():
         rp = getattr(mod, "radar_provider", None)
         if callable(rp):
@@ -85,10 +100,36 @@ def _collect_providers() -> tuple[list, list]:
         np_ = getattr(mod, "nwp_provider", None)
         if callable(np_):
             nwp.append(np_)
-    return radar, nwp
+        sp = getattr(mod, "satellite_provider", None)
+        if callable(sp):
+            sat.append(sp)
+    return radar, nwp, sat
 
 
-RADAR_PROVIDERS, NWP_PROVIDERS = _collect_providers()
+RADAR_PROVIDERS, NWP_PROVIDERS, SATELLITE_PROVIDERS = _collect_providers()
+
+
+def collect_radar_contributions(settings) -> list:
+    """Walk active radar providers; return their contributions.
+
+    Returns ``[]`` when ``settings.radar_enabled`` is False, short-
+    circuiting every provider call so no S3 / HTTP / cache machinery
+    gets stood up.  Used by the fetcher and the coverage-metadata
+    helper so both honour the global radar toggle from one place.
+    """
+    if not getattr(settings, "radar_enabled", True):
+        return []
+    contributions = []
+    for provider in RADAR_PROVIDERS:
+        try:
+            contribution = provider(settings)
+        except Exception:
+            logger.exception("Radar source provider %r raised", provider)
+            continue
+        if contribution is None:
+            continue
+        contributions.append(contribution)
+    return contributions
 
 
 def collect_nwp_contributions(settings, cache_dir) -> list:
@@ -99,7 +140,14 @@ def collect_nwp_contributions(settings, cache_dir) -> list:
     callers can feed it straight into ``NWPChain``.  Providers that
     return ``None`` (e.g. ``hrdps_enabled=False`` or
     ``eu_nwp_profile != "dini_with_icon_eu"``) are filtered out.
+
+    Honours the ``regional_nwp_enabled`` master switch: when False,
+    every contribution flagged ``regional=True`` is dropped, leaving
+    the global IFS base layer alone.  Useful during satellite-only
+    or nowcast-only development where the regional download volume
+    isn't worth waiting on.
     """
+    regional_enabled = getattr(settings, "regional_nwp_enabled", True)
     contributions = []
     for provider in NWP_PROVIDERS:
         try:
@@ -109,7 +157,42 @@ def collect_nwp_contributions(settings, cache_dir) -> list:
             continue
         if contribution is None:
             continue
+        if contribution.regional and not regional_enabled:
+            continue
         contributions.append(contribution)
+    contributions.sort(key=lambda c: c.priority)
+    return contributions
+
+
+def collect_satellite_contributions(settings, cache_dir) -> list:
+    """Walk active satellite providers; return contributions sorted by priority.
+
+    A provider may return *one or more* ``SatelliteContribution`` objects
+    (one per channel; e.g. GMGSI returns LW + VIS together).  Each
+    contribution carries its own instance, name, slug, and priority.
+
+    Returns ``[]`` when ``settings.satellite_enabled`` is False,
+    short-circuiting every provider call so no S3 / HTTP / cache
+    machinery gets stood up.  Mirrors the radar-toggle pattern from
+    ``collect_radar_contributions``; future satellite-master toggles
+    fold in here rather than at each provider.
+    """
+    if not getattr(settings, "satellite_enabled", True):
+        return []
+    contributions = []
+    for provider in SATELLITE_PROVIDERS:
+        try:
+            result = provider(settings, cache_dir)
+        except Exception:
+            logger.exception("Satellite source provider %r raised", provider)
+            continue
+        if result is None:
+            continue
+        # Providers may return a single contribution or a list — normalize.
+        if isinstance(result, list):
+            contributions.extend(c for c in result if c is not None)
+        else:
+            contributions.append(result)
     contributions.sort(key=lambda c: c.priority)
     return contributions
 
@@ -136,14 +219,7 @@ def collect_radar_coverage_metadata(
     """
     station_map: dict[str, list[tuple[float, float]]] = {}
     range_overrides: dict[str, float] = {}
-    for provider in RADAR_PROVIDERS:
-        try:
-            contribution = provider(settings)
-        except Exception:
-            logger.exception("Radar source provider %r raised", provider)
-            continue
-        if contribution is None:
-            continue
+    for contribution in collect_radar_contributions(settings):
         for region_name, stations in contribution.station_map.items():
             station_map[region_name] = list(stations)
         for region_name, range_km in contribution.range_overrides.items():

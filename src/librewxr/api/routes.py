@@ -28,7 +28,10 @@ from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
 from librewxr.tiles.renderer import render_coverage_tile, render_tile
 from librewxr.tiles.request_tracker import TileRequestTracker
-from librewxr.tiles.satellite_renderer import render_satellite_tile
+from librewxr.tiles.satellite_renderer import (
+    render_gmgsi_composite_tile,
+    render_gmgsi_tile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +49,10 @@ tile_cache: TileCache | None = None
 nwp_grids: dict[str, object] = {}
 ecmwf_grid = None  # ECMWFGrid | None — special-cased by /v2/radar arrows
 nwp_chain = None  # NWPChain | None
-cloud_grid = None  # CloudGrid | None
+# GMGSI satellite sources keyed by slug (gmgsi_lw_grid, gmgsi_vis_grid).
+# Routes index by slug so the /health endpoint and tile dispatcher
+# auto-pick up new channels without per-source plumbing.
+satellite_grids: dict[str, object] = {}
 tile_warmer = None  # TileWarmer | None
 nowcast_store = None  # NowcastStore | None
 radar_cache = None  # RadarFrameCache | None
@@ -130,7 +136,11 @@ async def health():
         for slug, grid in nwp_grids.items()
     }
     nowcast_bytes = nowcast_store.data_bytes if nowcast_store else 0
-    satellite_bytes = cloud_grid.data_bytes if cloud_grid else 0
+    satellite_bytes = sum(
+        grid.data_bytes
+        for grid in satellite_grids.values()
+        if grid is not None
+    )
     coord_bytes = coord_cache_bytes()
     tracked_bytes = (
         radar_bytes + tile_cache_bytes + sum(nwp_bytes_by_slug.values())
@@ -184,9 +194,18 @@ async def health():
         },
         "satellite": {
             "enabled": settings.satellite_enabled,
-            "loaded": cloud_grid is not None and cloud_grid.loaded,
-            "reference_time": cloud_grid.reference_time if cloud_grid else None,
-            "timesteps": cloud_grid.timestep_count if cloud_grid else 0,
+            "channels": {
+                slug: {
+                    "loaded": grid is not None and bool(grid.timestamps),
+                    "frames": len(grid.timestamps) if grid is not None else 0,
+                    "latest": (
+                        grid.timestamps[-1]
+                        if grid is not None and grid.timestamps
+                        else None
+                    ),
+                }
+                for slug, grid in satellite_grids.items()
+            },
         },
         "enabled_regions": enabled_regions or [],
         "sources": {
@@ -245,10 +264,15 @@ async def weather_maps() -> WeatherMapsResponse:
         ]
 
     infrared = []
-    if cloud_grid is not None and cloud_grid.loaded:
+    # Catalog timestamps come from GMGSI LW since LW is the always-on
+    # 24/7 baseline (VIS only carries the daytime half of the day).
+    # When the satellite layer is disabled or unloaded the array is
+    # empty and the tile endpoint returns 503.
+    gmgsi_lw = satellite_grids.get("gmgsi_lw_grid") if satellite_grids else None
+    if gmgsi_lw is not None and gmgsi_lw.timestamps:
         infrared = [
             RadarTimestamp(time=ts, path=f"/v2/satellite/{ts}")
-            for ts in cloud_grid.timestamps
+            for ts in gmgsi_lw.timestamps
         ]
 
     color_schemes = [
@@ -422,10 +446,14 @@ async def satellite_tile(
     y: int = Path(ge=0),
     ext: str = Path(pattern=r"^(png|webp)$"),
 ) -> Response:
-    """Satellite-like cloud cover tile from IFS cloud data."""
-    if cloud_grid is None or not cloud_grid.loaded:
-        raise HTTPException(status_code=503, detail="Satellite data not available")
+    """Real satellite imagery tile, backed by NOAA GMGSI.
 
+    Backing renderer is picked per request: the VIS-over-LW composite
+    when both channels have ingested frames (the production path during
+    Phase 2+), or the stand-alone LW renderer when only longwave IR is
+    loaded.  When the satellite layer is disabled or neither channel has
+    any frames yet, returns 503.
+    """
     if z > settings.max_zoom:
         raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
 
@@ -435,7 +463,23 @@ async def satellite_tile(
 
     tile_size = 512 if size >= 512 else 256
 
-    cache_key = ("sat", timestamp, z, x, y, tile_size, ext)
+    # Backing selection: composite when both channels loaded, LW-only
+    # otherwise, 503 if nothing's ready.
+    gmgsi_lw = satellite_grids.get("gmgsi_lw_grid") if satellite_grids else None
+    gmgsi_vis = satellite_grids.get("gmgsi_vis_grid") if satellite_grids else None
+    has_lw = gmgsi_lw is not None and bool(gmgsi_lw.timestamps)
+    has_vis = gmgsi_vis is not None and bool(gmgsi_vis.timestamps)
+
+    if has_lw and has_vis:
+        backing = "gmgsi_composite"
+    elif has_lw:
+        backing = "gmgsi_lw"
+    else:
+        raise HTTPException(status_code=503, detail="Satellite data not available")
+
+    # Distinct cache keys per backing so a runtime swap (e.g. VIS ingest
+    # catching up after restart) doesn't serve stale composites.
+    cache_key = ("sat", backing, timestamp, z, x, y, tile_size, ext)
     cached = tile_cache.get(cache_key)
     if cached is not None:
         return Response(
@@ -444,20 +488,31 @@ async def satellite_tile(
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    tile_bytes = await asyncio.to_thread(
-        render_satellite_tile,
-        cloud_grid=cloud_grid,
-        z=z, x=x, y=y,
-        tile_size=tile_size,
-        timestamp=timestamp,
-        fmt=ext,
-    )
+    if backing == "gmgsi_composite":
+        tile_bytes = await asyncio.to_thread(
+            render_gmgsi_composite_tile,
+            lw_source=gmgsi_lw,
+            vis_source=gmgsi_vis,
+            z=z, x=x, y=y,
+            tile_size=tile_size,
+            timestamp=timestamp,
+            fmt=ext,
+        )
+    else:
+        tile_bytes = await asyncio.to_thread(
+            render_gmgsi_tile,
+            source=gmgsi_lw,
+            z=z, x=x, y=y,
+            tile_size=tile_size,
+            timestamp=timestamp,
+            fmt=ext,
+        )
+    sat_timestamps = gmgsi_lw.timestamps
 
     tile_cache.put(cache_key, tile_bytes)
 
-    # Satellite frames are all historical once loaded (IFS model-run based)
-    satellite_timestamps = cloud_grid.timestamps if cloud_grid else []
-    latest_sat_ts = max(satellite_timestamps) if satellite_timestamps else None
+    # Older-than-latest frames are immutable; give them a long max-age.
+    latest_sat_ts = max(sat_timestamps) if sat_timestamps else None
     max_age = 7200 if (latest_sat_ts is not None and timestamp < latest_sat_ts) else 300
 
     return Response(

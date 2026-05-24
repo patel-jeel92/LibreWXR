@@ -52,7 +52,7 @@ The basic flow for displaying radar on a web page is:
 
 Each radar frame represents a 10-minute snapshot of precipitation. The API typically serves 12 past frames (2 hours of history) plus optional nowcast (forecast) frames up to 60 minutes into the future.
 
-LibreWXR also serves **satellite tiles** — IFS-derived cloud cover that approximates infrared satellite imagery. These work the same way (fetch timestamps, build URLs, add as a layer) but use a different URL pattern and update hourly instead of every 10 minutes.
+LibreWXR also serves **satellite tiles** — real satellite imagery from NOAA's GMGSI hourly global mosaic, rendered as a VIS-over-LW composite (daytime visible reflectance over longwave IR cloud tops, with a natural day/night terminator). These work the same way as radar (fetch timestamps, build URLs, add as a layer) but use a different URL pattern and update hourly instead of every 10 minutes.
 
 Beyond tiles, LibreWXR exposes a **weather alerts API** — a global feed of WMO CAP alerts (severe weather warnings, watches, advisories) returned as a GeoJSON FeatureCollection that you can drop into any map library that consumes GeoJSON.
 
@@ -130,7 +130,7 @@ This is the starting point for any integration. It returns metadata about all av
 | `radar.past` | Array of past (observed) radar frames, oldest first. |
 | `radar.nowcast` | Array of forecast frames, nearest future first. May be empty if nowcasting is disabled. |
 | `radar.colorSchemes` | Array of available color schemes (`id` and `name`). Use for dynamically populating UI dropdowns. |
-| `satellite.infrared` | Array of satellite (cloud cover) frames, oldest first. Hourly cadence, up to 12 hours. May be empty if satellite is disabled or still loading. |
+| `satellite.infrared` | Array of GMGSI satellite frames, oldest first. Hourly cadence, up to 12 hours. May be empty if satellite is disabled or still loading. |
 | `time` | Unix timestamp (seconds) of the frame. |
 | `path` | Path prefix for tile requests for this frame. |
 
@@ -194,7 +194,7 @@ Satellite tiles use a simpler URL than radar — there are no color scheme, smoo
 http://localhost:8080/v2/satellite/1700000400/256/5/8/12/0/0_0.png
 ```
 
-The satellite layer renders IFS-derived cloud cover that approximates infrared satellite imagery. High clouds appear bright white, mid-altitude clouds light gray, and low clouds darker gray. Coverage is global with hourly updates.
+The satellite layer renders real imagery from NOAA's GMGSI mosaic. The day side shows visible reflectance (continents, oceans, sunlit clouds); the night side shows cold cloud tops in longwave IR on a transparent basemap. The terminator transition is automatic — no client-side logic needed. Hourly updates; coverage extends to ±72.7° latitude.
 
 ### Coverage Tile Endpoint
 
@@ -564,7 +564,7 @@ The arrows are rendered server-side into the tile image. They show precipitation
 
 ### 8. Adding a Satellite Layer
 
-LibreWXR can serve IFS-derived cloud cover tiles that approximate infrared satellite imagery. These use a different tile URL pattern than radar and are typically shown as a separate, toggleable layer.
+LibreWXR serves real satellite imagery from NOAA's GMGSI mosaic as a VIS-over-LW composite (visible reflectance on the day side, longwave IR clouds on the night side, with an automatic terminator crossfade). These use a different tile URL pattern than radar and are typically shown as a separate, toggleable layer.
 
 Satellite frames are listed under `satellite.infrared` in the metadata response. They use hourly timestamps (vs radar's 10-minute cadence) and can cover up to 12 hours of history.
 
@@ -604,8 +604,9 @@ function showSatelliteFrame(apiData, position) {
 **Key differences from radar tiles:**
 - URL path ends with `/0/0_0.{ext}` (fixed) instead of `/{color}/{smooth}_{snow}.{ext}`
 - No `?arrows=` query parameter
-- Lower opacity (0.5–0.6) works well since cloud cover is visually dense
+- Lower opacity (0.5–0.7) works well since the day-side composite shows bright continents and a higher opacity can wash out basemap labels
 - Hourly cadence — animation is slower, so a longer delay between frames looks more natural
+- Returns 503 when the satellite layer is disabled on the server (handle gracefully — show no satellite layer rather than an error toast)
 
 To add a toggle button:
 

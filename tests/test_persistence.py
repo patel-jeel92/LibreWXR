@@ -16,7 +16,6 @@ import numpy as np
 import pytest
 
 from librewxr.sources.regional.caribbean.nwp.arome_antilles.grid import AROMEAntillesGrid
-from librewxr.data.cloud_grid import CloudGrid
 from librewxr.sources.regional.europe.nwp.dmi_dini.grid import DMIDiniGrid
 from librewxr.sources.world.ifs.grid import ECMWFGrid
 from librewxr.sources.regional.north_america.canada.nwp.hrdps.grid import HRDPSGrid
@@ -136,15 +135,6 @@ class TestECMWFGridPersistence:
         # Memory-mapped arrays should be readable
         assert consumer.data is not None
         assert consumer.data.shape == (1801, 3600)
-
-
-class TestCloudGridPersistence:
-    def test_empty_roundtrip(self, tmp_path: Path) -> None:
-        producer = CloudGrid(cache_dir=tmp_path)
-        snapshot = _roundtrip(producer.__getstate__())
-        consumer = CloudGrid(cache_dir=tmp_path)
-        consumer.__setstate__(snapshot)
-        assert consumer.timestep_count == 0
 
 
 # ──────────────────────────────────────────────────────────────────────────

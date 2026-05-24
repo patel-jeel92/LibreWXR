@@ -87,7 +87,6 @@ def test_pipeline_writes_state_json_via_hook(tmp_path, monkeypatch):
         stores = {
             "frame_store": store,
             "ecmwf_grid": None,
-            "cloud_grid": None,
             "nowcast_store": None,
         }
         dump_state(stores, cache_dir)

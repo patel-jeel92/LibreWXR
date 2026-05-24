@@ -15,7 +15,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from librewxr.api import routes
 from librewxr.config import settings
-from librewxr.data.cloud_grid import CloudGrid
 from librewxr.data.coverage import build_coverage_masks, build_feather_masks
 from librewxr.data.fetcher import RadarFetcher
 from librewxr.data.master_state import apply_state, load_state, state_mtime
@@ -25,7 +24,9 @@ from librewxr.data.store import FrameStore
 from librewxr.sources import (
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
+    collect_satellite_contributions,
     nwp_grid_slug,
+    satellite_source_slug,
 )
 from librewxr.data.alerts_store import AlertsStore
 from librewxr.data.alerts_fetcher import WMOAlertsFetcher
@@ -39,7 +40,7 @@ from librewxr.tiles.request_tracker import TileRequestTracker
 from librewxr.tiles.warmer import TileWarmer
 
 # Map dotted logger names to short subsystem tags so concurrent startup
-# (radar / IFS / cloud all firing in parallel) reads cleanly in the log.
+# (radar / IFS / NWP / GMGSI all firing in parallel) reads cleanly in the log.
 # Anything not in the map falls back to the last segment of the module
 # path (e.g. an unmapped third-party logger keeps its own short name).
 _LOG_TAGS = {
@@ -61,8 +62,6 @@ _LOG_TAGS = {
     "librewxr.sources.regional.north_america.canada.nwp.hrdps.grid": "hrdps",
     "librewxr.sources.regional.caribbean.nwp.arome_antilles.grid": "arome-ant",
     "librewxr.sources.regional.south_america.nwp.wrf_smn.grid": "wrf-smn",
-    "librewxr.data.cloud_grid": "cloud",
-    "librewxr.data.cloud_cache": "cloud",
     "librewxr.data.nowcast": "nowcast",
     "librewxr.tiles.warmer": "warmer",
     "librewxr.tiles.cache": "tiles",
@@ -145,7 +144,7 @@ async def _wait_for_state(cache_dir, timeout: float) -> None:
 async def _render_only_lifespan(app: FastAPI):
     """Lifespan for tile-server workers in the multi-worker split.
 
-    Pulls all radar / NWP / cloud data from the snapshot the data
+    Pulls all radar / NWP / satellite data from the snapshot the data
     pipeline writes, and refreshes it in place every time
     ``state.json``'s mtime advances.  No fetcher, no NWP HTTP clients,
     no nowcast computation — just rendering.
@@ -172,14 +171,17 @@ async def _render_only_lifespan(app: FastAPI):
     nwp_grids_by_slug: dict[str, object] = {
         nwp_grid_slug(c): c.instance for c in nwp_contribs
     }
-    cloud_grid = CloudGrid(cache_dir=cache_dir) if settings.satellite_enabled else None
+    satellite_contribs = collect_satellite_contributions(settings, cache_dir)
+    satellite_grids_by_slug: dict[str, object] = {
+        satellite_source_slug(c): c.instance for c in satellite_contribs
+    }
     nowcast_store = NowcastStore(cache_dir=cache_dir) if settings.nowcast_enabled else None
     alerts_store = AlertsStore() if settings.alerts_enabled else None
 
     stores: dict[str, object | None] = {
         "frame_store": store,
         **nwp_grids_by_slug,
-        "cloud_grid": cloud_grid,
+        **satellite_grids_by_slug,
         "nowcast_store": nowcast_store,
         "alerts_store": alerts_store,
     }
@@ -207,8 +209,12 @@ async def _render_only_lifespan(app: FastAPI):
     nwp_grids_by_slug = {
         slug: stores[slug] for slug in nwp_grids_by_slug if stores[slug] is not None
     }
+    satellite_grids_by_slug = {
+        slug: stores[slug]
+        for slug in satellite_grids_by_slug
+        if stores[slug] is not None
+    }
     ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
-    cloud_grid = stores["cloud_grid"]
     nowcast_store = stores["nowcast_store"]
     alerts_store = stores["alerts_store"]
 
@@ -257,7 +263,7 @@ async def _render_only_lifespan(app: FastAPI):
     routes.nwp_grids = nwp_grids_by_slug
     routes.ecmwf_grid = ecmwf_grid
     routes.nwp_chain = nwp_chain
-    routes.cloud_grid = cloud_grid
+    routes.satellite_grids = satellite_grids_by_slug
     routes.tile_warmer = None
     routes.nowcast_store = nowcast_store
     routes.tile_request_tracker = tile_request_tracker
@@ -325,8 +331,6 @@ async def _render_only_lifespan(app: FastAPI):
         store.cleanup()
         if nowcast_store is not None:
             nowcast_store.cleanup()
-        if cloud_grid is not None:
-            await cloud_grid.close()
         logger.info("Render-only worker shutdown complete")
 
 
@@ -356,7 +360,15 @@ async def lifespan(app: FastAPI):
     ecmwf_grid = nwp_grids_by_slug.get("ecmwf_grid")
     nwp_chain = NWPChain([c.instance for c in nwp_contribs])
     logger.info("NWP chain: [%s]", ", ".join(s.name for s in nwp_chain.sources))
-    cloud = CloudGrid() if settings.satellite_enabled else None
+    satellite_contribs = collect_satellite_contributions(settings, nwp_cache_dir)
+    satellite_grids_by_slug: dict[str, object] = {
+        satellite_source_slug(c): c.instance for c in satellite_contribs
+    }
+    if satellite_contribs:
+        logger.info(
+            "Satellite chain: [%s]",
+            ", ".join(c.name for c in satellite_contribs),
+        )
     enabled = settings.get_enabled_regions()
 
     # Precompute radar station coverage masks used by the ECMWF fallback
@@ -447,7 +459,7 @@ async def lifespan(app: FastAPI):
     routes.nwp_grids = nwp_grids_by_slug
     routes.ecmwf_grid = ecmwf_grid
     routes.nwp_chain = nwp_chain
-    routes.cloud_grid = cloud
+    routes.satellite_grids = satellite_grids_by_slug
     routes.tile_warmer = warmer
     routes.nowcast_store = nowcast_store
     routes.tile_request_tracker = tile_request_tracker
@@ -477,7 +489,7 @@ async def lifespan(app: FastAPI):
     fetcher = RadarFetcher(
         store, cache,
         nwp_contributions=nwp_contribs,
-        cloud_grid=cloud,
+        satellite_contributions=satellite_contribs,
         nowcast_generator=nowcast_generator,
         warmer=warmer,
         radar_cache=radar_cache,
@@ -486,7 +498,7 @@ async def lifespan(app: FastAPI):
     routes.radar_fetcher = fetcher
     logger.info(
         "Starting LibreWXR (public_url=%s, max_zoom=%d, regions=%s, "
-        "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s, satellite=%s, "
+        "tile_cache=%d MB, memory_limit=%d MB, nowcast=%s, "
         "alerts=%s, cache_dir=%s)",
         settings.public_url,
         settings.max_zoom,
@@ -494,7 +506,6 @@ async def lifespan(app: FastAPI):
         settings.tile_cache_mb,
         mem_limit,
         f"{settings.nowcast_frames} frames" if settings.nowcast_enabled else "off",
-        f"{settings.satellite_max_frames} frames" if settings.satellite_enabled else "off",
         "enabled" if settings.alerts_enabled else "off",
         settings.cache_dir or "(none)",
     )
@@ -528,8 +539,6 @@ async def lifespan(app: FastAPI):
     request_executor.shutdown(wait=False)
     if nowcast_store is not None:
         nowcast_store.cleanup()
-    if cloud is not None:
-        await cloud.close()
     cache.clear()
     store.cleanup()
     logger.info("LibreWXR shutdown complete")

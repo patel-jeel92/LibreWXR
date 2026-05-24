@@ -22,7 +22,7 @@ This document is the **full** reference for every setting LibreWXR understands. 
   - [Caribbean: AROME Antilles](#caribbean-arome-antilles)
   - [South American: WRF-SMN](#south-american-wrf-smn)
 - [Nowcasting](#nowcasting)
-- [Satellite (IFS-Derived Clouds)](#satellite-ifs-derived-clouds)
+- [Satellite (GMGSI)](#satellite-gmgsi)
 - [Weather Alerts (WMO CAP)](#weather-alerts-wmo-cap)
 - [Persistent Cache](#persistent-cache)
 - [Performance and Reliability](#performance-and-reliability)
@@ -432,7 +432,7 @@ Number of uvicorn worker processes.
 | **Type** | integer |
 
 - **Single-process mode** (`docker-compose.yml`): each worker is a fully independent copy of LibreWXR with its own frame store, caches, and fetcher. More workers = more concurrency at ~1.3 GB+ RAM each. Recommended: 1 worker per 2 CPU cores; put a caching proxy in front for high traffic.
-- **Multi-worker mode** (`docker-compose.multiworker.yml`): render workers share radar/NWP/cloud state via memmap snapshots written by a sidecar `data-pipeline` process. Scale workers across many cores without the per-worker data RAM cost — total RSS ≈ workers × (interpreter ~80 MB + tile cache + coord cache) + a single shared page-cache backing the memmap. Recommended: 8-32 workers depending on rack size.
+- **Multi-worker mode** (`docker-compose.multiworker.yml`): render workers share radar/NWP/satellite state via memmap snapshots written by a sidecar `data-pipeline` process. Scale workers across many cores without the per-worker data RAM cost — total RSS ≈ workers × (interpreter ~80 MB + tile cache + coord cache) + a single shared page-cache backing the memmap. Recommended: 8-32 workers depending on rack size.
 
 ### `LIBREWXR_MEMORY_LIMIT_MB`
 
@@ -485,7 +485,7 @@ To enable:
 
 ### `LIBREWXR_RENDER_ONLY`
 
-When `true` (or `1`), the worker skips fetcher / NWP grid / cloud / nowcast initialization entirely. It only memory-maps the snapshot the pipeline writes and renders tiles from it.
+When `true` (or `1`), the worker skips fetcher / NWP grid / satellite / nowcast initialization entirely. It only memory-maps the snapshot the pipeline writes and renders tiles from it.
 
 | | |
 |---|---|
@@ -520,12 +520,11 @@ LibreWXR uses ECMWF IFS 9 km global data from [Open-Meteo](https://open-meteo.co
 
 - Precipitation animation everywhere the regional NWP chain doesn't reach
 - Per-pixel snow/rain classification
-- Cloud cover for the IR-like satellite tile layer
 - Nowcast extrapolation outside regional model coverage
 
 ### `LIBREWXR_ECMWF_ENABLED`
 
-Disable ECMWF IFS entirely. Useful only for isolating regional NWP layers during debugging — anywhere outside the regional models will then simply show zero precipitation and no satellite cloud.
+Disable ECMWF IFS entirely. Useful only for isolating regional NWP layers during debugging — anywhere outside the regional models will then simply show zero precipitation.
 
 | | |
 |---|---|
@@ -953,11 +952,33 @@ The model side is taken from the active NWP chain — **HRRR over CONUS, HRDPS o
 
 ---
 
-## Satellite (IFS-Derived Clouds)
+## Satellite (GMGSI)
 
-Composites ECMWF IFS cloud_cover_high / mid / low into IR-like cloud tiles. Populates the Rain Viewer-compatible `satellite.infrared` endpoint.
+Real satellite imagery backed by NOAA's GMGSI hourly global mosaic — GOES-East + GOES-West + Meteosat-9 + Meteosat-10 + Himawari-9, composited and re-projected by NESDIS into a single equirectangular file per hour per channel. LibreWXR ingests two channels (longwave IR + visible) and renders the `/v2/satellite/...` tile endpoint as a VIS-over-LW composite with a natural day/night terminator crossfade. Coverage extends to ±72.7° latitude.
+
+When the satellite layer is disabled, the endpoint returns 503 and the catalog's `satellite.infrared` array is empty (mirrors the `LIBREWXR_RADAR_ENABLED=false` behaviour).
 
 ### `LIBREWXR_SATELLITE_ENABLED`
+
+Master switch for the satellite layer.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_GMGSI_LW_ENABLED`
+
+Per-channel toggle for GMGSI longwave IR (~12 µm). LW is the 24/7 base of the composite and works on the night side too. Disabling it alongside VIS effectively disables the layer.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
+### `LIBREWXR_GMGSI_VIS_ENABLED`
+
+Per-channel toggle for GMGSI visible (~0.6 µm). VIS adds the daytime reflected-sunlight overlay; on the night side it contributes nothing. Disabling VIS while LW stays on degrades the composite to LW-only without breaking the endpoint.
 
 | | |
 |---|---|
@@ -966,14 +987,12 @@ Composites ECMWF IFS cloud_cover_high / mid / low into IR-like cloud tiles. Popu
 
 ### `LIBREWXR_SATELLITE_MAX_FRAMES`
 
-Hourly IFS cloud cover timesteps to keep. Each timestep adds ~20 MB RAM (three 3600x1801 uint8 grids).
+Number of hourly satellite frames retained per channel. GMGSI publishes one frame per hour, so 12 ≈ 12 hours of animation. Each frame is ~15 MB, so 12 frames × 2 channels ≈ 360 MB resident.
 
 | | |
 |---|---|
 | **Default** | `12` |
 | **Type** | integer |
-
-12 timesteps = 12 hours of cloud cover animation.
 
 ---
 
@@ -1024,7 +1043,7 @@ Cache directory for the downloaded MeteoAlarm geocode data. Empty = system temp.
 
 ### `LIBREWXR_CACHE_DIR`
 
-Cache directory for processed grids (satellite cloud, NWP, alerts geocodes, master state snapshot). When set, data is saved as memory-mapped files that survive restarts, crashes, and container recreation — no need to re-download from upstream on startup.
+Cache directory for processed grids (GMGSI satellite, NWP, alerts geocodes, master state snapshot). When set, data is saved as memory-mapped files that survive restarts, crashes, and container recreation — no need to re-download from upstream on startup.
 
 | | |
 |---|---|
@@ -1101,7 +1120,7 @@ Each worker process holds its own copy of radar frames, NWP grids, coordinate ca
 
 ### Multi-worker mode
 
-Render workers share radar/NWP/cloud state via memmap, so adding workers doesn't multiply the data RAM — only the per-worker tile cache and Python interpreter overhead (~80 MB).
+Render workers share radar/NWP/satellite state via memmap, so adding workers doesn't multiply the data RAM — only the per-worker tile cache and Python interpreter overhead (~80 MB).
 
 | Configuration | Pipeline RAM | Render RAM (total) | Total |
 |---|---|---|---|

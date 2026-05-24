@@ -29,6 +29,40 @@ class Settings(BaseSettings):
     warm_overview_zoom: int = 4  # Pre-render ALL tiles up to this zoom on each fetch (-1 = disable)
     warm_overview_zoom_regional: int = 6  # Pre-render tiles overlapping enabled regions up to this zoom (-1 = disable)
     enabled_regions: str = "ALL"  # Region spec: CONUS, US, ALL, or comma-separated region names
+    # Global radar-layer toggle.  When False, no radar provider gets
+    # instantiated — every MRMS / IEM / MSC / OPERA / MARN / CWA / MMD
+    # fetcher is skipped, region-coverage masks are empty, and the radar
+    # tile path returns "no data" so the IFS-derived cloud cover or the
+    # real-satellite layer takes over the entire map.  Useful for
+    # satellite-only deployments and for faster startup during
+    # development of non-radar features.  Per-source toggles below
+    # still apply when this is True.
+    radar_enabled: bool = True
+    # Master switch for every regional NWP source — HRRR, HRRR-Alaska,
+    # HRDPS, AROME-OM family, DMI DINI, ICON-EU, WRF-SMN.  When False,
+    # the NWP chain collapses to ECMWF IFS alone, keeping the global
+    # precipitation layer intact.  Useful for fast startup during
+    # satellite-only or nowcast-only development.  Per-source
+    # ``*_enabled`` toggles still apply when this is True.
+    regional_nwp_enabled: bool = True
+    # Master switch for the satellite layer.  Backs the /v2/satellite/...
+    # endpoint with NOAA's hourly global GMGSI mosaic (LW + VIS via
+    # composite — see docs/satellite-implementation-plan.md).  When
+    # False, the satellite endpoint returns 503 and the catalog's
+    # ``satellite.infrared`` array is empty (same pattern as
+    # ``radar_enabled``).  Per-channel toggles below still apply when
+    # this is True.
+    satellite_enabled: bool = True
+    # Per-channel GMGSI toggles.  LW backs the IR night side of the
+    # composite; VIS adds the daytime reflected-sunlight overlay with
+    # natural terminator crossfade.  Disabling VIS while LW stays on
+    # degrades the composite to LW-only without breaking the endpoint.
+    gmgsi_lw_enabled: bool = True
+    gmgsi_vis_enabled: bool = True
+    # Number of hourly satellite frames retained per channel.  GMGSI
+    # publishes one frame per hour, so 12 ≈ 12 hours of animation.
+    # At ~15 MB per channel per frame, 12 × 2 channels ≈ 360 MB resident.
+    satellite_max_frames: int = 12
     # US-side radar data source (USCOMP / AKCOMP / HICOMP / PRCOMP / GUCOMP).
     # Three modes:
     #   mrms_fallback  - (default) MRMS primary + IEM fallback when MRMS fails.
@@ -230,12 +264,10 @@ class Settings(BaseSettings):
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "blended"  # "radar", "blended", or "model"
-    satellite_enabled: bool = True  # Fetch and serve IFS-derived cloud cover as satellite tiles
-    satellite_max_frames: int = 12  # Number of hourly IFS cloud timesteps to keep
-    cache_dir: str = ""  # Persistent cache directory for satellite grids; empty = in-memory only
+    cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
 
     # Multi-worker tile-server split.  When render_only is True, this
-    # process skips fetcher / NWP grid / cloud / nowcast initialisation
+    # process skips fetcher / NWP grid / satellite / nowcast initialisation
     # and instead memory-maps an existing snapshot under cache_dir
     # written by ``python -m librewxr.data_pipeline``.  cache_dir is
     # required in render-only mode.
