@@ -99,23 +99,30 @@ def render_gmgsi_tile(
     """
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
     encoded = source.sample(lat_grid, lon_grid, timestamp)
-
-    # Normalize to [0, 1] for both brightness and alpha.  Encoded == 0
-    # is the no-data sentinel (outside the disk or dqf-masked); leave
-    # it fully transparent.
-    norm = encoded.astype(np.float32) / 255.0
     no_data = encoded == 0
 
-    # Gamma curve gently lifts thin clouds so faint features show
-    # without darkening the bright cloud tops.  0.7 is the standard
-    # GeoColor-style perceptual lift.
-    alpha = np.power(np.clip(norm, 0.0, 1.0), 0.7)
+    # Suppress warm pixels (ground / ocean / low cloud) so the layer
+    # behaves like a satellite cloud image instead of an unfiltered
+    # brightness-temperature map.  The threshold sits where typical
+    # mid-cloud brightness starts — encoded ~110 in GMGSI's 0–255
+    # scale, roughly corresponding to ~270 K.  Below the threshold,
+    # alpha is zero; above, it ramps to 1.0 with a mild gamma to keep
+    # thin cirrus visible without washing out heavy convection.
+    cloud_threshold = 110.0
+    cloud_max = 255.0
+    cloud_ramp = np.clip(
+        (encoded.astype(np.float32) - cloud_threshold)
+        / (cloud_max - cloud_threshold),
+        0.0, 1.0,
+    )
+    alpha = np.power(cloud_ramp, 0.7)
     alpha = np.where(no_data, 0.0, alpha)
 
-    # Slight cool tint in the blue channel matches the existing
-    # IFS-derived satellite aesthetic; the renderer hasn't visibly
-    # changed for users when GMGSI takes over for IFS-cloud.
-    brightness = np.clip(norm * 255.0, 0, 255)
+    # Brightness uses the full encoded value so subtle cloud-top
+    # temperature differences still show as luminance variation;
+    # alpha handles whether the pixel is rendered at all.  Slight
+    # cool tint matches the existing satellite aesthetic.
+    brightness = encoded.astype(np.float32)
     rgba = np.zeros((*encoded.shape, 4), dtype=np.uint8)
     rgba[..., 0] = brightness.astype(np.uint8)
     rgba[..., 1] = brightness.astype(np.uint8)
