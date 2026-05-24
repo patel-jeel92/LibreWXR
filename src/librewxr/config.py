@@ -46,6 +46,19 @@ class Settings(BaseSettings):
     # nowcast-only development.  Per-source ``*_enabled`` toggles
     # still apply when this is True.
     regional_nwp_enabled: bool = True
+    # Master switch for the GMGSI satellite source — backs the
+    # /v2/satellite/... endpoint with NOAA's hourly global IR mosaic
+    # (LW + VIS via composite, see docs/satellite-implementation-plan.md).
+    # When False, the satellite endpoint returns 503 and the catalog's
+    # satellite.infrared array is empty (same pattern as radar_enabled).
+    # Per-channel toggles below still apply when this is True.
+    gmgsi_enabled: bool = True
+    # Per-channel GMGSI toggles.  Phase 1 ships LW only; VIS lands in
+    # Phase 2 alongside the composite renderer.
+    gmgsi_lw_enabled: bool = True
+    # Retention window for ingested GMGSI frames, in hours.  At ~15 MB
+    # per channel per hour, 12 hours × 2 channels = ~360 MB resident.
+    gmgsi_retention_hours: int = 12
     # US-side radar data source (USCOMP / AKCOMP / HICOMP / PRCOMP / GUCOMP).
     # Three modes:
     #   mrms_fallback  - (default) MRMS primary + IEM fallback when MRMS fails.
