@@ -6,7 +6,15 @@ import numpy as np
 from PIL import Image
 
 from librewxr.config import settings
+from librewxr.sources.satellite.gmgsi.source import LAT_MAX as _GMGSI_LAT_MAX
+from librewxr.sources.satellite.gmgsi.source import LAT_MIN as _GMGSI_LAT_MIN
 from librewxr.tiles.coordinates import tile_pixel_latlons
+
+# Smoothstep alpha attenuation across the last few degrees of GMGSI
+# disk coverage so the ±72.7° horizontal cutoffs fade into the basemap
+# instead of reading as a hard line at low zoom.  2° is ~220 km at the
+# equator — visible as a soft fade without eating significant valid data.
+_DISK_EDGE_FEATHER_DEGREES = 2.0
 
 
 def render_satellite_tile(
@@ -116,6 +124,23 @@ def _pack_rgba(brightness: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     return rgba
 
 
+def _disk_edge_feather(lat_grid: np.ndarray) -> np.ndarray:
+    """Smoothstep alpha multiplier that fades the disk's lat edges.
+
+    Returns 1.0 anywhere more than ``_DISK_EDGE_FEATHER_DEGREES`` inside
+    the GMGSI coverage band, ramping down to 0.0 at the edge via the
+    cubic smoothstep ``3t² − 2t³`` (gentler than a linear ramp).  Pixels
+    already outside the disk get 0 from the clip, which is harmless —
+    their alpha was already 0 from the no-data sentinel.
+    """
+    edge_distance = np.minimum(
+        _GMGSI_LAT_MAX - lat_grid,
+        lat_grid - _GMGSI_LAT_MIN,
+    )
+    t = np.clip(edge_distance / _DISK_EDGE_FEATHER_DEGREES, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
 def render_gmgsi_tile(
     source,
     z: int,
@@ -135,6 +160,7 @@ def render_gmgsi_tile(
     lat_grid, lon_grid = tile_pixel_latlons(z, x, y, tile_size)
     encoded = source.sample(lat_grid, lon_grid, timestamp)
     brightness, alpha = _lw_brightness_and_alpha(encoded)
+    alpha = alpha * _disk_edge_feather(lat_grid)
     rgba = _pack_rgba(brightness, alpha)
     img = Image.fromarray(rgba, "RGBA")
     return _encode_image(img, fmt)
@@ -183,6 +209,7 @@ def render_gmgsi_composite_tile(
     inv_vis_alpha = 1.0 - vis_alpha
     out_brightness = vis_brightness * vis_alpha + lw_brightness * inv_vis_alpha
     out_alpha = vis_alpha + lw_alpha * inv_vis_alpha
+    out_alpha = out_alpha * _disk_edge_feather(lat_grid)
 
     rgba = _pack_rgba(out_brightness, out_alpha)
     img = Image.fromarray(rgba, "RGBA")

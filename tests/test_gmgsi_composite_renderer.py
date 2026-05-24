@@ -6,6 +6,11 @@ The composite is "VIS over LW" via standard alpha compositing.  These
 tests use a duck-typed fake source returning a constant grid so we can
 predict the exact post-blend pixel values without round-tripping S3 or
 NetCDF decoding.
+
+Tile coordinates ``z=2, x=2, y=1`` are chosen so the tile sits entirely
+between lat 0° and +66.5° — well inside GMGSI's ±72.7° disk, where the
+edge-feather alpha multiplier is 1.0 and doesn't perturb the predicted
+output values.
 """
 from __future__ import annotations
 
@@ -72,10 +77,10 @@ def test_composite_pure_night_renders_lw_only():
     """VIS=0 collapses the composite to the LW threshold result."""
     lw = _ConstantSource(180)  # cold cloud
     vis = _ConstantSource(0)
-    png = render_gmgsi_composite_tile(lw, vis, z=2, x=0, y=0, tile_size=32)
+    png = render_gmgsi_composite_tile(lw, vis, z=2, x=2, y=1, tile_size=32)
     composite = _decode_png(png)
 
-    lw_only_png = render_gmgsi_tile(lw, z=2, x=0, y=0, tile_size=32)
+    lw_only_png = render_gmgsi_tile(lw, z=2, x=2, y=1, tile_size=32)
     lw_only = _decode_png(lw_only_png)
 
     # Identical: VIS contributed nothing.
@@ -86,7 +91,7 @@ def test_composite_pure_day_dominated_by_vis():
     """VIS=255 fully overrides LW (vis_alpha=1.0 → out=vis)."""
     lw = _ConstantSource(180)
     vis = _ConstantSource(255)
-    png = render_gmgsi_composite_tile(lw, vis, z=2, x=0, y=0, tile_size=32)
+    png = render_gmgsi_composite_tile(lw, vis, z=2, x=2, y=1, tile_size=32)
     rgba = _decode_png(png)
 
     # VIS brightness wins entirely; alpha is also 1.0.
@@ -103,7 +108,7 @@ def test_composite_twilight_blends_linearly():
     lw = _ConstantSource(lw_value)
     vis = _ConstantSource(vis_value)
 
-    png = render_gmgsi_composite_tile(lw, vis, z=2, x=0, y=0, tile_size=32)
+    png = render_gmgsi_composite_tile(lw, vis, z=2, x=2, y=1, tile_size=32)
     rgba = _decode_png(png)
 
     vis_alpha = vis_value / 255.0
@@ -116,7 +121,7 @@ def test_composite_outside_disk_is_fully_transparent():
     """Both channels reporting encoded=0 means nothing to render."""
     lw = _ConstantSource(0)
     vis = _ConstantSource(0)
-    png = render_gmgsi_composite_tile(lw, vis, z=2, x=0, y=0, tile_size=32)
+    png = render_gmgsi_composite_tile(lw, vis, z=2, x=2, y=1, tile_size=32)
     rgba = _decode_png(png)
     assert np.all(rgba[..., 3] == 0)
 
@@ -125,7 +130,7 @@ def test_composite_alpha_includes_lw_contribution_on_night_side():
     """Cold LW under VIS=0 stays visible (alpha > 0) — clouds on night side."""
     lw = _ConstantSource(220)  # very cold cloud
     vis = _ConstantSource(0)
-    png = render_gmgsi_composite_tile(lw, vis, z=2, x=0, y=0, tile_size=32)
+    png = render_gmgsi_composite_tile(lw, vis, z=2, x=2, y=1, tile_size=32)
     rgba = _decode_png(png)
     assert rgba[0, 0, 3] > 200  # well above transparent
 
@@ -135,7 +140,7 @@ def test_composite_alpha_includes_lw_contribution_on_night_side():
 
 def test_lw_only_renderer_returns_valid_png():
     lw = _ConstantSource(200)
-    png = render_gmgsi_tile(lw, z=2, x=0, y=0, tile_size=32)
+    png = render_gmgsi_tile(lw, z=2, x=2, y=1, tile_size=32)
     rgba = _decode_png(png)
     assert rgba.shape == (32, 32, 4)
     assert rgba[0, 0, 0] == 200
@@ -143,6 +148,6 @@ def test_lw_only_renderer_returns_valid_png():
 
 def test_lw_only_renderer_below_threshold_is_transparent():
     lw = _ConstantSource(50)  # warm ground
-    png = render_gmgsi_tile(lw, z=2, x=0, y=0, tile_size=32)
+    png = render_gmgsi_tile(lw, z=2, x=2, y=1, tile_size=32)
     rgba = _decode_png(png)
     assert np.all(rgba[..., 3] == 0)
