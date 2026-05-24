@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from librewxr.sources._base import SatelliteContribution
 
-from .source import GMGSILWSource
+from .source import GMGSILWSource, GMGSIVISSource
 
-__all__ = ["GMGSILWSource", "satellite_provider"]
+__all__ = ["GMGSILWSource", "GMGSIVISSource", "satellite_provider"]
 
 
 def satellite_provider(settings, cache_dir) -> list[SatelliteContribution]:
@@ -25,19 +25,30 @@ def satellite_provider(settings, cache_dir) -> list[SatelliteContribution]:
     into the global satellite-contribution registry.  Returning ``[]``
     when every channel is disabled is equivalent to returning ``None``.
 
-    Phase 1 has LW only; VIS lands in Phase 2 and will join this list
-    behind its own ``gmgsi_vis_enabled`` toggle.
+    Both channels are ingested independently; the composite renderer
+    in ``tiles/satellite_renderer.py`` blends them at render time.
+    Disabling VIS while LW stays on degrades the composite to LW-only.
     """
     contributions: list[SatelliteContribution] = []
+    retention = getattr(settings, "gmgsi_retention_hours", 12)
 
     if getattr(settings, "gmgsi_lw_enabled", True):
-        retention = getattr(settings, "gmgsi_retention_hours", 12)
         contributions.append(
             SatelliteContribution(
                 instance=GMGSILWSource(cache_dir=cache_dir, max_frames=retention),
                 priority=10,
                 name="GMGSI LW",
                 slug="gmgsi_lw_grid",
+            ),
+        )
+
+    if getattr(settings, "gmgsi_vis_enabled", True):
+        contributions.append(
+            SatelliteContribution(
+                instance=GMGSIVISSource(cache_dir=cache_dir, max_frames=retention),
+                priority=11,
+                name="GMGSI VIS",
+                slug="gmgsi_vis_grid",
             ),
         )
 

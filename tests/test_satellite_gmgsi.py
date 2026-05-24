@@ -20,6 +20,7 @@ import pytest
 from librewxr.sources.satellite.gmgsi.source import (
     GMGSILWSource,
     GMGSISource,
+    GMGSIVISSource,
     GRID_HEIGHT,
     GRID_WIDTH,
     LAT_MAX,
@@ -63,32 +64,79 @@ def test_parse_start_timestamp_rejects_malformed():
 # ── Provider shape ──
 
 
-def test_satellite_provider_returns_lw_contribution(tmp_path: Path):
-    """With ``gmgsi_lw_enabled=True``, the provider emits the LW contribution."""
+def test_satellite_provider_returns_lw_and_vis_when_both_enabled(tmp_path: Path):
+    """Default config (both channels on) emits two contributions, LW first."""
     from librewxr.sources._base import SatelliteContribution
     from librewxr.sources.satellite.gmgsi import satellite_provider
 
     settings = MagicMock()
     settings.gmgsi_lw_enabled = True
+    settings.gmgsi_vis_enabled = True
+    settings.gmgsi_retention_hours = 12
+
+    contribs = satellite_provider(settings, cache_dir=tmp_path)
+    assert len(contribs) == 2
+
+    lw, vis = contribs
+    assert isinstance(lw, SatelliteContribution)
+    assert lw.name == "GMGSI LW"
+    assert lw.slug == "gmgsi_lw_grid"
+    assert isinstance(lw.instance, GMGSILWSource)
+    assert lw.priority == 10
+
+    assert vis.name == "GMGSI VIS"
+    assert vis.slug == "gmgsi_vis_grid"
+    assert isinstance(vis.instance, GMGSIVISSource)
+    assert vis.priority == 11
+
+
+def test_satellite_provider_lw_only_when_vis_disabled(tmp_path: Path):
+    """Disabling VIS drops the second contribution, leaving LW alone."""
+    from librewxr.sources.satellite.gmgsi import satellite_provider
+
+    settings = MagicMock()
+    settings.gmgsi_lw_enabled = True
+    settings.gmgsi_vis_enabled = False
     settings.gmgsi_retention_hours = 12
 
     contribs = satellite_provider(settings, cache_dir=tmp_path)
     assert len(contribs) == 1
-    assert isinstance(contribs[0], SatelliteContribution)
-    assert contribs[0].name == "GMGSI LW"
     assert contribs[0].slug == "gmgsi_lw_grid"
-    assert isinstance(contribs[0].instance, GMGSILWSource)
 
 
-def test_satellite_provider_skips_disabled_channel(tmp_path: Path):
-    """``gmgsi_lw_enabled=False`` drops the LW channel from the provider's output."""
+def test_satellite_provider_vis_only_when_lw_disabled(tmp_path: Path):
+    """Disabling LW while VIS stays on still returns the VIS contribution."""
     from librewxr.sources.satellite.gmgsi import satellite_provider
 
     settings = MagicMock()
     settings.gmgsi_lw_enabled = False
+    settings.gmgsi_vis_enabled = True
+    settings.gmgsi_retention_hours = 12
+
+    contribs = satellite_provider(settings, cache_dir=tmp_path)
+    assert len(contribs) == 1
+    assert contribs[0].slug == "gmgsi_vis_grid"
+    assert isinstance(contribs[0].instance, GMGSIVISSource)
+
+
+def test_satellite_provider_skips_when_all_channels_disabled(tmp_path: Path):
+    """Both toggles off → empty contribution list."""
+    from librewxr.sources.satellite.gmgsi import satellite_provider
+
+    settings = MagicMock()
+    settings.gmgsi_lw_enabled = False
+    settings.gmgsi_vis_enabled = False
 
     contribs = satellite_provider(settings, cache_dir=tmp_path)
     assert contribs == []
+
+
+def test_vis_subclass_s3_metadata():
+    """GMGSIVISSource pins the VIS-specific product path and filename token."""
+    assert GMGSIVISSource.channel == "VIS"
+    assert GMGSIVISSource.s3_product_path == "GMGSI_VIS"
+    assert GMGSIVISSource.s3_filename_prefix == "GLOBCOMPVIS"
+    assert GMGSIVISSource.friendly_name == "GMGSI VIS"
 
 
 # ── Frame store / retention ──

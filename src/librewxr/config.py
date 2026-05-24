@@ -53,9 +53,12 @@ class Settings(BaseSettings):
     # satellite.infrared array is empty (same pattern as radar_enabled).
     # Per-channel toggles below still apply when this is True.
     gmgsi_enabled: bool = True
-    # Per-channel GMGSI toggles.  Phase 1 ships LW only; VIS lands in
-    # Phase 2 alongside the composite renderer.
+    # Per-channel GMGSI toggles.  LW backs the IR night side of the
+    # composite; VIS adds the daytime reflected-sunlight overlay with
+    # natural terminator crossfade.  Disabling VIS while LW stays on
+    # degrades the composite to LW-only without breaking the endpoint.
     gmgsi_lw_enabled: bool = True
+    gmgsi_vis_enabled: bool = True
     # Retention window for ingested GMGSI frames, in hours.  At ~15 MB
     # per channel per hour, 12 hours × 2 channels = ~360 MB resident.
     gmgsi_retention_hours: int = 12

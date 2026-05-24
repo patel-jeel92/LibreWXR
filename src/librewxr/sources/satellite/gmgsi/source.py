@@ -471,3 +471,19 @@ class GMGSILWSource(GMGSISource):
     s3_product_path: ClassVar[str] = "GMGSI_LW"
     friendly_name: ClassVar[str] = "GMGSI LW"
     s3_filename_prefix: ClassVar[str] = "GLOBCOMPLIR"
+
+
+class GMGSIVISSource(GMGSISource):
+    """GMGSI Visible (~0.6 µm).
+
+    Reflected sunlight — bright clouds and bright continents on the
+    sunlit side, encoded value 0 on the night side because there is
+    no sun to reflect.  The renderer uses the encoded value directly
+    as both luminance and alpha, so the day/night terminator emerges
+    naturally from the underlying reflectance field.
+    """
+
+    channel: ClassVar[str] = "VIS"
+    s3_product_path: ClassVar[str] = "GMGSI_VIS"
+    friendly_name: ClassVar[str] = "GMGSI VIS"
+    s3_filename_prefix: ClassVar[str] = "GLOBCOMPVIS"

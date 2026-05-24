@@ -28,7 +28,11 @@ from librewxr.tiles.cache import TileCache
 from librewxr.tiles.coordinates import coord_cache_bytes, coord_cache_stats
 from librewxr.tiles.renderer import render_coverage_tile, render_tile
 from librewxr.tiles.request_tracker import TileRequestTracker
-from librewxr.tiles.satellite_renderer import render_gmgsi_tile, render_satellite_tile
+from librewxr.tiles.satellite_renderer import (
+    render_gmgsi_composite_tile,
+    render_gmgsi_tile,
+    render_satellite_tile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -439,11 +443,12 @@ async def satellite_tile(
 ) -> Response:
     """Real satellite imagery tile (GMGSI) — IFS-derived fallback if GMGSI off.
 
-    GMGSI is the canonical backing in Phase 1+: the LW (longwave IR)
-    channel covers the populated globe and renders 24/7.  Phase 2 will
-    swap this for the VIS-over-LW composite.  The fallback to the
-    IFS-derived synthetic renderer exists only until Phase 1.5 deletes
-    that path entirely; do not rely on it as a long-term behaviour.
+    Backing source selection happens per request: VIS-over-LW composite
+    when both channels have ingested frames, stand-alone LW when only
+    longwave IR is loaded, and the legacy IFS-derived synthetic renderer
+    when GMGSI is fully disabled.  The synthetic fallback exists only
+    until Phase 1.5 deletes that path entirely; do not rely on it as a
+    long-term behaviour.
     """
     if z > settings.max_zoom:
         raise HTTPException(status_code=400, detail=f"Zoom {z} exceeds max {settings.max_zoom}")
@@ -454,15 +459,29 @@ async def satellite_tile(
 
     tile_size = 512 if size >= 512 else 256
 
-    # Pick backing source: GMGSI when available, else IFS-derived fallback.
+    # Pick backing source.  Preference order:
+    #   1. Both LW + VIS available → VIS-over-LW composite (Phase 2).
+    #   2. LW only → stand-alone LW renderer.
+    #   3. Neither available but IFS-derived synthetic loaded → legacy
+    #      fallback (Phase 1.5 deletes this branch entirely).
+    #   4. Otherwise 503.
     gmgsi_lw = satellite_grids.get("gmgsi_lw_grid") if satellite_grids else None
-    use_gmgsi = gmgsi_lw is not None and bool(gmgsi_lw.timestamps)
-    if not use_gmgsi and (cloud_grid is None or not cloud_grid.loaded):
+    gmgsi_vis = satellite_grids.get("gmgsi_vis_grid") if satellite_grids else None
+    has_lw = gmgsi_lw is not None and bool(gmgsi_lw.timestamps)
+    has_vis = gmgsi_vis is not None and bool(gmgsi_vis.timestamps)
+    has_ifs_fallback = cloud_grid is not None and cloud_grid.loaded
+
+    if has_lw and has_vis:
+        backing = "gmgsi_composite"
+    elif has_lw:
+        backing = "gmgsi_lw"
+    elif has_ifs_fallback:
+        backing = "ifs"
+    else:
         raise HTTPException(status_code=503, detail="Satellite data not available")
 
-    # Distinct cache keys so the GMGSI and IFS-derived tiles never
-    # collide if the toggle ever flips at runtime.
-    backing = "gmgsi" if use_gmgsi else "ifs"
+    # Distinct cache keys per backing so a runtime swap (e.g. VIS ingest
+    # catching up after restart) doesn't serve stale composites.
     cache_key = ("sat", backing, timestamp, z, x, y, tile_size, ext)
     cached = tile_cache.get(cache_key)
     if cached is not None:
@@ -472,7 +491,18 @@ async def satellite_tile(
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    if use_gmgsi:
+    if backing == "gmgsi_composite":
+        tile_bytes = await asyncio.to_thread(
+            render_gmgsi_composite_tile,
+            lw_source=gmgsi_lw,
+            vis_source=gmgsi_vis,
+            z=z, x=x, y=y,
+            tile_size=tile_size,
+            timestamp=timestamp,
+            fmt=ext,
+        )
+        sat_timestamps = gmgsi_lw.timestamps
+    elif backing == "gmgsi_lw":
         tile_bytes = await asyncio.to_thread(
             render_gmgsi_tile,
             source=gmgsi_lw,
