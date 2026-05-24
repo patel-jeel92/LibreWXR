@@ -94,9 +94,16 @@ class NWPContribution:
     Three sources opt out: IFS (legacy key drops the "_ifs"), and the
     two AROME-OM variants whose display names include non-ASCII
     characters that wouldn't round-trip through the slugger.
+
+    ``regional`` flags the contribution as part of the regional NWP
+    chain — when ``regional_nwp_enabled`` is False, the central
+    collector drops every regional contribution and lets IFS carry
+    the chain alone.  Defaults to True so new sources don't have to
+    opt in to the gate.  IFS itself sets ``regional=False``.
     """
 
     instance: NWPGrid
     priority: int
     name: str
     slug: str | None = None
+    regional: bool = True

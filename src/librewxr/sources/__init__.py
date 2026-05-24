@@ -122,7 +122,14 @@ def collect_nwp_contributions(settings, cache_dir) -> list:
     callers can feed it straight into ``NWPChain``.  Providers that
     return ``None`` (e.g. ``hrdps_enabled=False`` or
     ``eu_nwp_profile != "dini_with_icon_eu"``) are filtered out.
+
+    Honours the ``regional_nwp_enabled`` master switch: when False,
+    every contribution flagged ``regional=True`` is dropped, leaving
+    the global IFS base layer alone.  Useful during satellite-only
+    or nowcast-only development where the regional download volume
+    isn't worth waiting on.
     """
+    regional_enabled = getattr(settings, "regional_nwp_enabled", True)
     contributions = []
     for provider in NWP_PROVIDERS:
         try:
@@ -131,6 +138,8 @@ def collect_nwp_contributions(settings, cache_dir) -> list:
             logger.exception("NWP source provider %r raised", provider)
             continue
         if contribution is None:
+            continue
+        if contribution.regional and not regional_enabled:
             continue
         contributions.append(contribution)
     contributions.sort(key=lambda c: c.priority)

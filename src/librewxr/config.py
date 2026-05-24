@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     # development of non-radar features.  Per-source toggles below
     # still apply when this is True.
     radar_enabled: bool = True
+    # Master switch for every regional NWP source — HRRR, HRRR-Alaska,
+    # HRDPS, AROME-OM family, DMI DINI, ICON-EU, WRF-SMN.  When False,
+    # the NWP chain collapses to ECMWF IFS only, leaving the global
+    # precipitation + cloud-cover + simulated-satellite paths fully
+    # intact.  Useful for fast startup during satellite-only or
+    # nowcast-only development.  Per-source ``*_enabled`` toggles
+    # still apply when this is True.
+    regional_nwp_enabled: bool = True
     # US-side radar data source (USCOMP / AKCOMP / HICOMP / PRCOMP / GUCOMP).
     # Three modes:
     #   mrms_fallback  - (default) MRMS primary + IEM fallback when MRMS fails.

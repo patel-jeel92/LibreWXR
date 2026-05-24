@@ -216,3 +216,30 @@ def test_radar_disabled_skips_coverage_metadata(monkeypatch):
     station_map, range_overrides = collect_radar_coverage_metadata(settings)
     assert station_map == {}
     assert range_overrides == {}
+
+
+def test_regional_nwp_disabled_keeps_only_ifs(tmp_path):
+    """LIBREWXR_REGIONAL_NWP_ENABLED=false collapses the chain to IFS only.
+
+    Locks in the master-toggle contract for any future regional NWP
+    source: as long as it leaves ``NWPContribution.regional`` at its
+    default (True), the central collector drops it when the toggle is
+    off.  IFS opts out via ``regional=False`` so the global base layer
+    keeps running.
+    """
+    from librewxr.config import settings as real_settings
+    from librewxr.sources import collect_nwp_contributions
+
+    # Baseline: when enabled, more than just IFS contributes.
+    real_settings.regional_nwp_enabled = True
+    enabled = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
+    assert len(enabled) > 1, "expected regional sources alongside IFS"
+    assert any(c.name == "ECMWF IFS" for c in enabled)
+
+    # Toggle off: every regional contribution drops out.
+    real_settings.regional_nwp_enabled = False
+    try:
+        disabled = collect_nwp_contributions(real_settings, cache_dir=tmp_path)
+        assert [c.name for c in disabled] == ["ECMWF IFS"]
+    finally:
+        real_settings.regional_nwp_enabled = True
