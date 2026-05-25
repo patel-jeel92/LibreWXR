@@ -643,9 +643,25 @@ function clearLayerCache() {
 function clearAllLayers() {
     stopAnimation();
     isLoading = false;
-    loadedPositions.forEach(function(pos) {
-        removeFrameSourceAndLayer(pos);
-    });
+    // Walk the live style so we catch layers from BOTH prefixes
+    // (radar- and sat-).  Mode switches change ``activeLayer`` before
+    // cleanup runs, so getLayerId() would only return the new prefix
+    // and silently miss the old layers — leaving them stuck on the map.
+    var style = map.getStyle();
+    if (style && style.layers) {
+        style.layers.slice().forEach(function(layer) {
+            if (layer.id.indexOf('radar-layer-') === 0 || layer.id.indexOf('sat-layer-') === 0) {
+                if (map.getLayer(layer.id)) map.removeLayer(layer.id);
+            }
+        });
+    }
+    if (style && style.sources) {
+        Object.keys(style.sources).forEach(function(srcId) {
+            if ((srcId.indexOf('radar-') === 0 || srcId.indexOf('sat-') === 0) && srcId !== 'sat-bg') {
+                if (map.getSource(srcId)) map.removeSource(srcId);
+            }
+        });
+    }
     loadedPositions.clear();
     currentLayerId = null;
 }
