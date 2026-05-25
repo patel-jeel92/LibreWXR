@@ -1,15 +1,25 @@
-# Single-container deployment — runs LibreWXR as one process (fetcher +
-# tile renderer in the same Python interpreter).  Good for personal /
-# small-scale self-hosting where one CPU and a few GB of RAM are
-# plenty.
+# LibreWXR — single tracked compose file covering both deployment shapes.
 #
-# For serious deployments (8+ cores, busy public instance), use
-# docker-compose.multiworker.yml instead — it splits the data pipeline
-# from a pool of render workers that share state via memmap, letting
-# every core actually do work instead of one core hitting the GIL.
+# Pick a mode by setting COMPOSE_PROFILES in your .env (the app reads
+# the same env var to pick its own per-mode defaults — workers, tile
+# cache, coord cache, warmer threads — so this one knob switches both):
+#
+#   COMPOSE_PROFILES=single   (one container; personal / small-scale,
+#                              fetcher + renderer in the same process)
+#   COMPOSE_PROFILES=multi    (pipeline sidecar + N renderer workers;
+#                              production, bypasses the Python GIL on
+#                              the render path)
+#
+# Deploy:  docker compose up --build -d
+#
+# A gitignored docker-compose.override.yml beside this file is auto-
+# merged for host-specific deltas (bind mounts, tunnels, etc.); no -f
+# chain needed.
 
 services:
+  # ─── SINGLE MODE ────────────────────────────────────────────────────
   librewxr:
+    profiles: ["single"]
     build: .
     ports:
       - "${LIBREWXR_PORT:-8080}:8080"
@@ -32,25 +42,84 @@ services:
     deploy:
       resources:
         limits:
-          # Adjust based on regions, frames, and which NWP sources you
-          # enable.  RAM is dominated by radar frames + NWP grids +
-          # coordinate / tile caches, all of which grow as you turn
-          # more on.
-          #
           # Rough RAM targets (1 worker, all defaults from .env.example):
           #   CONUS + IFS only:                       ~3-4 GB
           #   CONUS + HRRR + IFS:                     ~4-5 GB
           #   ALL regions + IFS only:                 ~7-8 GB
           #   ALL regions + full NWP chain:           ~9-10 GB
-          #     (HRRR + HRRR-Alaska + HRDPS + DMI DINI + ICON-EU +
-          #      AROME Antilles + WRF-SMN + IFS, with cloud/alerts on)
-          #
           # Override in .env: LIBREWXR_MEMORY=10G
           memory: ${LIBREWXR_MEMORY:-7G}
 
+  # ─── MULTI MODE ─────────────────────────────────────────────────────
+  # pipeline   — single asyncio process fetching all radar / NWP /
+  #              satellite / alerts data and writing a state.json
+  #              snapshot under /data/cache after every fetch cycle.
+  # renderer   — N uvicorn worker processes that memmap the same files
+  #              and refresh their in-memory stores when state.json
+  #              changes.  No fetcher, no upstream HTTP — only tile
+  #              rendering.
+  #
+  # Defaults below target an 80-core / 32 GB rack.  Tune LIBREWXR_WORKERS
+  # and the memory limits down for smaller hardware.
+  pipeline:
+    profiles: ["multi"]
+    build: .
+    command: ["python", "-m", "librewxr.data_pipeline"]
+    env_file:
+      - .env
+    environment:
+      LIBREWXR_CACHE_DIR: /data/cache
+    volumes:
+      - librewxr-cache:/data/cache
+      - earthkit-cache:/root/.cache/earthkit-regrid
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: ${LIBREWXR_PIPELINE_MEMORY:-12G}
+
+  renderer:
+    profiles: ["multi"]
+    build: .
+    command: ["python", "-m", "librewxr.main"]
+    ports:
+      - "${LIBREWXR_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      LIBREWXR_CACHE_DIR: /data/cache
+      # render_only skips fetcher / NWP / satellite / nowcast init —
+      # the renderer reads everything from the pipeline's snapshot.
+      LIBREWXR_RENDER_ONLY: "1"
+    volumes:
+      - librewxr-cache:/data/cache
+    # Render workers wait for state.json with a 300 s default timeout
+    # (LIBREWXR_STATE_WAIT_TIMEOUT).  depends_on starts the pipeline
+    # first so the wait window is shorter on cold start.
+    depends_on:
+      - pipeline
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: ${LIBREWXR_RENDER_MEMORY:-18G}
+
+  # ─── MANUAL UTILITIES ───────────────────────────────────────────────
   # Wipe the shared cache volume.  Gated behind the "manual" profile so
-  # it doesn't run on every `docker compose up` — explicit targeting via
-  # `run` still works regardless of the profile.  Invoke with:
+  # it doesn't run on every `up` — explicit targeting via `run` still
+  # works regardless of which mode is active.  Invoke with:
   #   docker compose run --rm clear-cache
   clear-cache:
     image: alpine:latest

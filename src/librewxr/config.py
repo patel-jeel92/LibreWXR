@@ -3,7 +3,29 @@
 import math
 from typing import Literal
 
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+
+# Per-mode defaults for settings whose sensible value depends on whether
+# LibreWXR is running as one container (single) or split into a pipeline
+# + N renderer workers (multi).  Anything the user leaves at the sentinel
+# value 0 is filled in from here by ``_apply_mode_defaults`` below.
+# Multi-mode values are PER WORKER — total RAM scales with workers count.
+_MODE_DEFAULTS: dict[str, dict[str, int]] = {
+    "single": {
+        "workers": 1,
+        "tile_cache_mb": 200,
+        "coord_cache_size": 2048,
+        "warmer_threads": 0,  # 0 keeps the "auto = CPU-1" behaviour in single mode
+    },
+    "multi": {
+        "workers": 16,
+        "tile_cache_mb": 128,
+        "coord_cache_size": 512,
+        "warmer_threads": 4,
+    },
+}
 
 
 class Settings(BaseSettings):
@@ -15,16 +37,29 @@ class Settings(BaseSettings):
     fetch_interval: int = 600  # seconds between fetches (10 min = radar frame cadence)
     max_frames: int = 12
     max_zoom: int = 12
-    tile_cache_mb: int = 200  # Max tile cache size in MB (byte-capped)
-    coord_cache_size: int = 2048  # LRU entries per coordinate cache (lower = less RAM)
+    # Deployment shape.  Drives sensible defaults for workers, tile cache,
+    # coord cache, and warmer threads via ``_apply_mode_defaults``.
+    #   single  - one container, fetcher + renderer in the same process
+    #   multi   - pipeline sidecar + N renderer workers sharing memmap state
+    # Reads LIBREWXR_MODE first, then falls back to Docker Compose's
+    # COMPOSE_PROFILES so docker users only need to set one env var.  Any
+    # token other than "multi" resolves to "single".
+    mode: Literal["single", "multi"] = Field(
+        "single",
+        validation_alias=AliasChoices("LIBREWXR_MODE", "COMPOSE_PROFILES"),
+    )
+    # All four below use 0 as a "use mode default" sentinel.  Set an
+    # explicit value to override the per-mode default in _MODE_DEFAULTS.
+    tile_cache_mb: int = 0  # Max tile cache size in MB (byte-capped); 0 = mode default
+    coord_cache_size: int = 0  # LRU entries per coordinate cache; 0 = mode default
     memory_limit_mb: int = 0  # Container memory limit in MB (0 = auto-detect)
     memory_pressure_check_interval: int = 30  # Seconds between memory pressure checks
     smooth_radius: float = 1.0  # Baseline Gaussian blur radius; renderer auto-scales it up at high zoom on coarse sources
     noise_floor_dbz: float = 10.0  # Minimum dBZ to display; lower values are zeroed out
     despeckle_min_neighbors: int = 3  # Min non-zero neighbors (of 8) to keep a pixel; 0 to disable
     webp_quality: int = 65  # WebP quality: 100 = lossless, 1-99 = lossy at that quality
-    workers: int = 1  # Number of uvicorn worker processes
-    warmer_threads: int = 0  # Render thread pool size (0 = CPU count - 1)
+    workers: int = 0  # Number of uvicorn worker processes; 0 = mode default
+    warmer_threads: int = 0  # Render thread pool size; 0 = mode default (auto in single, 4 in multi)
     warm_coord_zoom: int = 6  # Pre-warm coordinate caches up to this zoom (0 = disable)
     warm_overview_zoom: int = 4  # Pre-render ALL tiles up to this zoom on each fetch (-1 = disable)
     warm_overview_zoom_regional: int = 6  # Pre-render tiles overlapping enabled regions up to this zoom (-1 = disable)
@@ -301,6 +336,35 @@ class Settings(BaseSettings):
     # bring fetch-cycle wall time closer to the slowest single source.
     nwp_fetch_concurrency: int = 4
     cors_origins: list[str] = ["*"]
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_mode(cls, v):
+        """Parse COMPOSE_PROFILES-style comma lists down to a single mode token.
+
+        COMPOSE_PROFILES is comma-separated (e.g. ``"multi,manual"``); the
+        ``manual`` profile is used for one-off services like clear-cache,
+        so we only care whether ``multi`` is in the list.  Anything else
+        falls back to ``single`` rather than failing Literal validation —
+        unrelated values in COMPOSE_PROFILES shouldn't crash startup.
+        """
+        if not isinstance(v, str):
+            return v
+        tokens = {t.strip() for t in v.split(",") if t.strip()}
+        if "multi" in tokens:
+            return "multi"
+        if "single" in tokens:
+            return "single"
+        return "single"
+
+    @model_validator(mode="after")
+    def _apply_mode_defaults(self):
+        """Fill in mode-appropriate defaults for any setting left at 0."""
+        defaults = _MODE_DEFAULTS[self.mode]
+        for name, value in defaults.items():
+            if getattr(self, name) == 0:
+                setattr(self, name, value)
+        return self
 
     def get_ecmwf_max_timesteps(self) -> int:
         """Return effective ECMWF timestep count.
