@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
 import csv
+import threading
 from importlib.resources import files
 
 import numpy as np
@@ -22,6 +23,14 @@ SCHEME_NAMES = {
 _rain_luts: dict[int, np.ndarray] = {}
 # Snow LUTs: same structure but for snow color variants
 _snow_luts: dict[int, np.ndarray] = {}
+# Guards the lazy-init in ``get_lut``.  Without this, a tile renderer
+# running many parallel ``colorize()`` calls on a fresh process can
+# race: thread A is partway through ``_load_color_table`` (so the
+# globals are non-empty but missing some scheme IDs), thread B sees
+# the truthy dict, skips the reload, and KeyErrors on whatever scheme
+# A hasn't populated yet.  Lock + atomic reassignment in
+# ``_load_color_table`` eliminate that window.
+_load_lock = threading.Lock()
 
 
 def _parse_hex_rgba(hex_str: str) -> tuple[int, int, int, int]:
@@ -31,13 +40,20 @@ def _parse_hex_rgba(hex_str: str) -> tuple[int, int, int, int]:
 
 
 def _load_color_table() -> None:
-    """Parse color_table.csv into LUTs."""
+    """Parse color_table.csv into LUTs.
+
+    Builds the rain / snow LUT dicts in local variables and assigns
+    them to the module globals in a single statement at the end, so
+    no caller can ever observe a partially-populated dict.  Combined
+    with the ``_load_lock`` in ``get_lut`` this makes lazy init
+    safe under arbitrary concurrent access.
+    """
     global _rain_luts, _snow_luts
 
     csv_path = files("librewxr.colors").joinpath("color_table.csv")
     text = csv_path.read_text()
     reader = csv.reader(text.strip().splitlines())
-    header = next(reader)
+    next(reader)  # skip header
 
     # Column indices for each scheme (skip first column which is dBZ)
     scheme_cols = {sid: i + 1 for i, sid in enumerate(SCHEME_NAMES.keys())}
@@ -54,6 +70,9 @@ def _load_color_table() -> None:
         else:
             snow_rows.append(row)
 
+    new_rain: dict[int, np.ndarray] = {}
+    new_snow: dict[int, np.ndarray] = {}
+
     for scheme_id, col_idx in scheme_cols.items():
         # Build 256-entry LUT for rain
         rain_lut = np.zeros((256, 4), dtype=np.uint8)
@@ -63,7 +82,7 @@ def _load_color_table() -> None:
             if color_idx < len(rain_rows) and col_idx < len(rain_rows[color_idx]):
                 r, g, b, a = _parse_hex_rgba(rain_rows[color_idx][col_idx])
                 rain_lut[pixel_val] = [r, g, b, a]
-        _rain_luts[scheme_id] = rain_lut
+        new_rain[scheme_id] = rain_lut
 
         # Build 256-entry LUT for snow
         snow_lut = np.zeros((256, 4), dtype=np.uint8)
@@ -72,14 +91,19 @@ def _load_color_table() -> None:
             if color_idx < len(snow_rows) and col_idx < len(snow_rows[color_idx]):
                 r, g, b, a = _parse_hex_rgba(snow_rows[color_idx][col_idx])
                 snow_lut[pixel_val] = [r, g, b, a]
-        _snow_luts[scheme_id] = snow_lut
+        new_snow[scheme_id] = snow_lut
 
     # Scheme 255 (Raw): identity mapping - pixel value becomes grayscale
     raw_lut = np.zeros((256, 4), dtype=np.uint8)
     for i in range(256):
         raw_lut[i] = [i, i, i, 255 if i > 0 else 0]
-    _rain_luts[255] = raw_lut
-    _snow_luts[255] = raw_lut
+    new_rain[255] = raw_lut
+    new_snow[255] = raw_lut
+
+    # Atomic publish: every concurrent reader sees either the empty
+    # dict (load hasn't run) or the fully-populated dict (load done).
+    _rain_luts = new_rain
+    _snow_luts = new_snow
 
 
 def get_lut(scheme: int, snow: bool = False) -> np.ndarray:
@@ -88,7 +112,9 @@ def get_lut(scheme: int, snow: bool = False) -> np.ndarray:
     Returns array of shape (256, 4) dtype uint8.
     """
     if not _rain_luts:
-        _load_color_table()
+        with _load_lock:
+            if not _rain_luts:  # double-check inside the lock
+                _load_color_table()
 
     luts = _snow_luts if snow else _rain_luts
     if scheme not in luts:

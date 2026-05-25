@@ -60,3 +60,37 @@ class TestColorize:
         values = np.random.randint(0, 256, size=(100, 100), dtype=np.uint8)
         result = colorize(values, scheme=6)
         assert result.shape == (100, 100, 4)
+
+
+class TestConcurrentLazyInit:
+    """Reset module-level LUTs and hammer ``get_lut`` from many threads.
+
+    Pre-fix this would intermittently KeyError because ``_load_color_table``
+    populated the global dicts entry-by-entry — readers entering between
+    the first ``_rain_luts[0] = …`` and the final ``_rain_luts[255] = …``
+    saw a truthy-but-incomplete dict and skipped the reload.  The fix
+    builds the dicts in locals and atomically reassigns at the end,
+    inside a lock that dedupes redundant loads.
+    """
+
+    def test_no_keyerror_under_concurrent_first_use(self):
+        import concurrent.futures
+        import librewxr.colors.schemes as schemes
+
+        # Force a fresh lazy-init for this test.
+        schemes._rain_luts = {}
+        schemes._snow_luts = {}
+
+        schemes_to_try = list(SCHEME_NAMES.keys()) + [99, 255]  # include invalid + raw
+
+        def worker(scheme: int) -> tuple[int, int]:
+            # Each worker hammers both rain + snow paths for one scheme.
+            rain = schemes.get_lut(scheme, snow=False)
+            snow = schemes.get_lut(scheme, snow=True)
+            return rain.shape[0], snow.shape[0]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as pool:
+            futures = [pool.submit(worker, s) for s in schemes_to_try * 8]
+            results = [f.result(timeout=10) for f in futures]
+
+        assert all(r == (256, 256) for r in results)
