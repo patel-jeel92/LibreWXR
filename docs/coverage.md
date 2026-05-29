@@ -38,12 +38,21 @@ box that would have implied coverage where none exists.
 | NOAA MRMS — Guam | NEXRAD WSR-88D (1) | 240 km | 2 min | ~0.0085° |
 | ECCC MSC Canada | S-band dual-pol (32) | 240 km | 6 min | ~0.025° |
 | EUMETNET OPERA | C-band (~155, 24 countries) | 300 km | 5 min | 1 km LAEA |
+| DPC Italy (VMI) | C-band + X-band (24: 11 DPC + 13 partner) | 150 km | 5 min | 1 km tmerc |
 | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
 | CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
 | MET Malaysia | S-band (12, national network) | 240 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
 
 MRMS and MSC ingest each other's stations along the US/Canada border,
 so the cross-border zone has overlap rather than a hard seam.
+
+Italy is **not** in the EUMETNET OPERA station list. What OPERA shows
+over Italian airspace is edge-of-range data from neighbouring radars
+(France Côte d'Azur, Switzerland, Slovenia, southern Germany, Croatia,
+Malta) — wide-beam, low-SNR, clutter-prone. The DPC Italian composite
+runs alongside OPERA in the `EUROPE` group with finer `pixel_size`, so
+the multi-region compositor lays ITCOMP down first wherever it covers
+and OPERA fills the rest of Europe.
 
 ---
 
@@ -78,6 +87,41 @@ DMI DINI and ICON-EU both cover Europe; the chain picks DINI inside
 its tighter domain and falls through to ICON-EU for the rest (then
 IFS beyond ICON-EU). This is configurable via
 [`LIBREWXR_EU_NWP_PROFILE`](configuration-reference.md#librewxr_eu_nwp_profile).
+
+---
+
+## Regional zooms
+
+The global maps above pack every source into one frame; the per-region
+zooms below let you read each network's detail without squinting.
+They use a tighter window and a mid-latitude aspect correction so the
+country shapes stay square at the visible scale.
+
+### Europe
+
+Radar — OPERA pan-European composite plus the DPC Italian national
+composite filling Italy with native data:
+
+![Europe radar coverage](coverage-map-europe-radar.png)
+
+Regional NWP — DMI HARMONIE DINI plus DWD ICON-EU:
+
+![Europe model coverage](coverage-map-europe-models.png)
+
+### North America
+
+Radar — NOAA MRMS (CONUS + Puerto Rico, with the eastern sliver of
+Alaska clipping into the window) plus ECCC MSC Canada. Caribbean
+radars (Cayman, Bermuda) are tracked in
+[`docs/source-survey.md`](source-survey.md) as future additions:
+
+![North America radar coverage](coverage-map-north-america-radar.png)
+
+Regional NWP — NOAA HRRR (CONUS + Alaska), ECCC HRDPS, plus the
+Météo-France AROME Antilles + Guyane grids reaching into the Caribbean
+fringe:
+
+![North America model coverage](coverage-map-north-america-models.png)
 
 ---
 

@@ -953,7 +953,7 @@ To animate through satellite frames, use the same pattern as radar animation (se
 
 ### Color Schemes
 
-LibreWXR supports all 9 Rain Viewer color schemes plus a raw grayscale mode:
+LibreWXR supports the 9 original Rain Viewer color schemes, a contributed scheme from the Datameteo Educational team, and a raw grayscale mode:
 
 | ID | Name | Description |
 |----|------|-------------|
@@ -966,9 +966,20 @@ LibreWXR supports all 9 Rain Viewer color schemes plus a raw grayscale mode:
 | 6 | NEXRAD Level III | US NWS standard radar colors |
 | 7 | Rainbow @ Selex SI | Full rainbow gradient (recommended default — closest to standard weather radar) |
 | 8 | Dark Sky | Muted, minimal style |
+| 9 | Datameteo Valerio | Discrete 5-dBZ stepped scale contributed by Valerio at Datameteo Educational; reads as distinct bins from drizzle through large hail / tornado |
 | 255 | Raw | Grayscale proportional to dBZ — useful for custom client-side coloring |
 
 Use the scheme ID as the `{color}` path parameter. If an invalid ID is provided, the server falls back to Rainbow @ Selex SI (7).
+
+#### Visual reference
+
+Rain palettes from 0..85 dBZ:
+
+![All rain color schemes](color-schemes-rain.png)
+
+Snow palettes from -10..50 dBZ (selected when the `snow` flag is `1`; classification comes from the regional NWP source or ECMWF IFS):
+
+![All snow color schemes](color-schemes-snow.png)
 
 ### Smoothing and Snow
 

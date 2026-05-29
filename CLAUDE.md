@@ -49,6 +49,7 @@ src/librewxr/
       central_america/el_salvador/radar/marn/
       east_asia/taiwan/radar/cwa/
       europe/radar/opera/
+      europe/italy/radar/dpc/
       europe/nwp/{icon_eu,dmi_dini}/
       north_america/
         canada/radar/msc_canada/
@@ -99,7 +100,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 
 ## Architecture Notes
 
-- **Multi-region:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA), Taiwan (TWCOMP), SE Asia (MYPENINSULAR, MYEAST)
+- **Multi-region:** US (USCOMP, AKCOMP, HICOMP, PRCOMP, GUCOMP), Canada (CACOMP), Central America (SVCOMP), Europe (OPERA + ITCOMP — Italy via DPC), Taiwan (TWCOMP), SE Asia (MYPENINSULAR, MYEAST)
 - **Region groups:** CONUS, US, CANADA, CENTRAL_AMERICA, EUROPE, SOUTHEAST_ASIA, TAIWAN, ALL (configured via `LIBREWXR_ENABLED_REGIONS`)
 - **NA source:** 3-way `LIBREWXR_NA_SOURCE` setting — `mrms_fallback` (default: MRMS + IEM/MSC fallback), `mrms` (MRMS only), `iem` (legacy IEM + MSC)
 - **Source dispatch:** `RadarFetcher` walks the auto-discovered radar providers under `sources/` and routes each region to the contributing source. NWP grids work the same way via `collect_nwp_contributions()`.
@@ -115,6 +116,7 @@ Tests use `pytest-asyncio` with `asyncio_mode = "auto"`. Markers are defined in 
 - **MARN/SNET (El Salvador):** Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from anonymous GCS bucket `radar-images-sv`; 5-min cadence; filename embeds local time (UTC-6, no DST); decoder maps HSV-style continuous hue gradient (green→cyan→blue→magenta) to dBZ; bucket archive depth ~24 h; MARN license requires citation
 - **CWA (Taiwan):** 7-radar QPESUMS composite (`O-A0059-001` / 雷達合成回波) from anonymous AWS S3 bucket `cwaopendata` in `ap-northeast-1`; 10-min cadence; archive key uses UTC+8 timestamp with no separator dot (`{YYYYMMDDHHMM}compref_mosaic.xml`); XML format with raw dBZ as comma-separated scientific-notation floats; data is row-major south-to-north → vertical flip on decode; sentinels `-99`/`-999`; OGDL v1.0 license, attribution required
 - **MMD (MET Malaysia):** 12-radar national composite covering Peninsular Malaysia + Borneo + Brunei + Singapore + N. Sumatra via anonymous HTTPS at `api.met.gov.my`; 10-min native cadence; one animated GIF per fetch (1352×570, 6 frames, ~60 min of backfill); 18-stop palette → dBZ Marshall-Palmer table; combined GIF split into MYPENINSULAR + MYEAST sub-rects (peer regions, one fetch shared between them); per-frame timestamps anchored at the current wall-clock 10-min slot because MET publishes each slot ~11 min after its real data time (anchoring on real time leaves the "current" slot perpetually empty); post-decode morphological close fills hairline gaps left by burned-in state-boundary lines; CC-BY-4.0 attribution required
+- **DPC (Italy):** 24-radar national VMI composite (11 DPC-direct + 13 partner) via the open Radar-DPC v2 REST API at `radar-api.protezionecivile.it`; 5-min cadence; two-step protocol — `GET /findLastProductByType?type=VMI` returns latest epoch-ms, `POST /downloadProduct` returns a 300–900 s pre-signed S3 URL; format is Cloud-Optimized GeoTIFF (LZW Float32, 1200×1400 at 1 km, spherical Transverse Mercator with `lat_0=42`, `lon_0=12.5`, `R=6371229`); decoded by `tifffile` + `imagecodecs` (no GDAL); -9999 sentinel → 0; lives in the EUROPE group alongside OPERA and wins precedence via finer `pixel_size` (0.009 vs 0.01) because Italy is not in the EUMETNET OPERA station list; CC-BY-SA 4.0 attribution-share-alike — derivative tiles inherit the share-alike clause
 
 ## Adding a New Source
 

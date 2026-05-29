@@ -48,6 +48,16 @@ Region: OPERA (\~155 radars across 24 countries). Source: EUMETNET OPERA CIRRUS 
 
 The legal lever that opened European radar data is the **EU High Value Datasets regulation (EU 2023/138)**, not WMO policy — it legally requires European meteorological data to be free, open-licensed, and API-accessible.
 
+**Italy is not in the OPERA station list** (CNMCA / DPC are EUMETNET members but historically have not contributed to the EUMETNET composite). What OPERA shows over Italian airspace is edge-of-range data from neighbouring countries (France Côte d'Azur, Switzerland, Slovenia, southern Germany, Croatia, Malta) — wide beam, low SNR, clutter-prone. The DPC source below fills that gap natively.
+
+### Italy — DPC National Radar Composite (VMI)
+
+Region: ITCOMP (group `EUROPE`, sits alongside OPERA — finer pixel_size, so the multi-region compositor lays ITCOMP down first wherever it covers). Source: Dipartimento della Protezione Civile via the open Radar-DPC v2 REST API at `radar-api.protezionecivile.it` — anonymous, no API key. Two-step protocol: `GET /findLastProductByType?type=VMI` returns the most recent epoch-ms timestamp; `POST /downloadProduct` returns a 300–900 s pre-signed S3 URL (`https://dpc-radar.s3.eu-south-1.amazonaws.com/VMI/DD-MM-YYYY-HH-MM.tif`). Cloud-Optimized GeoTIFF (LZW, single-band Float32). Resolution 1200×1400 at 1 km, spherical Transverse Mercator (lat₀=42°N, lon₀=12.5°E, R=6371229 m, k₀=1). 5-minute cadence. No-data sentinel: `-9999.0` (occasionally `-9998.0`).
+
+Network: 24 radars (11 DPC-direct — 7 C-band Gematronik Meteor 600 C and 4 X-band 50 DX — plus 13 partner radars run by regional ARPAs, PAA Trento, ENAV at Linate / Fiumicino, Aeronautica Militare at Capocaccia). License: **Creative Commons Attribution-ShareAlike 4.0 (CC-BY-SA 4.0)**, attribution "Radar-DPC" required. The share-alike clause makes this the strictest license in LibreWXR's source stack — derivative tiles must inherit CC-BY-SA, and downstream operators need to surface that.
+
+GeoTIFF decode uses `tifffile` + `imagecodecs` (pure-Python, no GDAL). The `/findLastProductByType` endpoint also lists a `SITES` product type, but `/downloadProduct` rejects it (`productType non supportato`) — there is no public station-list endpoint, so `stations.py` is hand-maintained against the *Allegato 1 — La Rete Radar Meteorologica Nazionale* DPC document (Tabella 1 + 2).
+
 ### El Salvador — MARN/SNET San Andrés
 
 Region: SVCOMP (group `CENTRAL_AMERICA`). Single S-band radar at San Andrés, 120 km product (`esar82/Images/`) from the anonymous GCS bucket `radar-images-sv`. Format: PNG with continuous HSV-style hue gradient (green → cyan → blue → magenta on the saturated outer ring); decoded by arc-detect + linear hue → dBZ map. Resolution 409×342 at \~1 km, regular lat/lon. 5-minute cadence, \~24-hour bucket retention. Filenames embed local time (UTC-6, no DST). License: MARN explicitly permits reproduction with citation.

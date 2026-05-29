@@ -226,6 +226,24 @@ Estimated publication lag (seconds) between a MET Malaysia frame's data time and
 | **Default** | `600` |
 | **Type** | integer (seconds) |
 
+### `LIBREWXR_DPC_BASE_URL`
+
+Base URL for the DPC Italian national radar composite REST API. The source hits `{base}/findLastProductByType?type=VMI` for the latest timestamp, then `POST {base}/downloadProduct` for a 300–900 s pre-signed S3 URL. Anonymous, no API key. **CC-BY-SA 4.0** — attribution "Radar-DPC" required and derivative tiles inherit the share-alike clause. Only used when `ITCOMP` or the `EUROPE` group is in `LIBREWXR_ENABLED_REGIONS`.
+
+| | |
+|---|---|
+| **Default** | `https://radar-api.protezionecivile.it` |
+| **Type** | string |
+
+### `LIBREWXR_DPC_ENABLED`
+
+Master toggle for the DPC Italy source. When `false`, drops `ITCOMP` from the active region set even if the `EUROPE` group alias or `ALL` would otherwise pull it in. OPERA continues to cover the rest of Europe — note that with DPC disabled, the layer over Italian airspace will be edge-of-range data from neighbouring countries' radars rather than native Italian data.
+
+| | |
+|---|---|
+| **Default** | `true` |
+| **Type** | boolean |
+
 ---
 
 ## Regions
@@ -247,7 +265,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `US` | `USCOMP`, `AKCOMP`, `HICOMP`, `PRCOMP`, `GUCOMP` | All US regions |
 | `CANADA` | `CACOMP` | Canada |
 | `CENTRAL_AMERICA` | `SVCOMP` | El Salvador + W. Honduras + S. Guatemala + offshore Pacific |
-| `EUROPE` | `OPERA` | Pan-European composite (~155 radars, 24 countries) |
+| `EUROPE` | `ITCOMP`, `OPERA` | DPC Italian national composite (24 radars) + OPERA pan-European composite (~155 radars, 24 countries). ITCOMP wins precedence over OPERA where it covers — Italy is not in the EUMETNET OPERA station list. |
 | `SOUTHEAST_ASIA` | `MYPENINSULAR`, `MYEAST` | Peninsular Malaysia + N. Sumatra + all of Borneo + Brunei + Singapore (MET Malaysia 12-radar composite) |
 | `TAIWAN` | `TWCOMP` | Taiwan + W. Pacific buffer (CWA QPESUMS 7-radar composite) |
 | `ALL` | All of the above | Every available region |
@@ -264,6 +282,7 @@ Which radar regions to fetch and serve. Accepts group aliases, individual region
 | `CACOMP` | Canada | MSC GeoMet (MRMS blending) | 3560 x 1720 | 0.025° (~2.5km) | ~6 MB |
 | `SVCOMP` | El Salvador + neighbours | MARN/SNET (San Andrés, 120 km) | 409 x 342 | 0.00926° (~1km) | <1 MB |
 | `OPERA` | Europe | EUMETNET OPERA (MeteoGate S3) | 3800 x 4400 | 1km (LAEA) | ~16 MB |
+| `ITCOMP` | Italy | DPC (Radar-DPC v2 REST API) | 1200 x 1400 | 1km (tmerc) | ~7 MB |
 | `TWCOMP` | Taiwan + W. Pacific | CWA QPESUMS (cwaopendata S3) | 921 x 881 | 0.0125° (~1.4km) | ~3 MB |
 | `MYPENINSULAR` | Peninsular Malaysia + N. Sumatra | MET Malaysia (12-radar composite) | 424 x 551 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
 | `MYEAST` | East Malaysia (Borneo) + Brunei | MET Malaysia (12-radar composite) | 640 x 570 | 0.022° lon / 0.019° lat (~2.5km) | <1 MB |
