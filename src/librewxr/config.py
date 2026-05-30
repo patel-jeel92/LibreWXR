@@ -170,13 +170,15 @@ class Settings(BaseSettings):
     # permitted, attribution required.
     jma_base_url: str = "https://www.jma.go.jp/bosai/jmatile/data/nowc"
     jma_enabled: bool = True
-    # Tile zoom level used for the fetch+stitch pipeline.  Defaults to 7
-    # (~2.5 km/px, ~99 tiles per frame for JPCOMP) which is 2x oversampled
-    # vs our 0.0125° internal grid.  Native HRPN is 250 m so this is still
-    # significantly undersampled, but matches the resolution of neighbouring
-    # TWCOMP coverage.  z=6 is the bandwidth-saver option (~30 tiles per
-    # frame, 5 km/px); z=8 would be gold-plated (~378 tiles per frame).
-    jma_zoom: int = 7
+    # Tile zoom level used for the fetch+stitch pipeline.  JMA's HRPN
+    # pyramid only serves real PNG palette data at EVEN zoom levels
+    # (z=4, 6, 8, 10); odd zooms return empty RGBA placeholder PNGs.
+    # z=8 (~1.25 km/px, ~420 tiles per frame for JPCOMP) is the best
+    # match for our 0.0125°/px (~1.4 km/px) internal grid.  z=6 is the
+    # bandwidth-saver option (~30 tiles per frame, 5 km/px) at the cost
+    # of resolution.  z=7 / z=9 must NOT be used — they look syntactically
+    # valid but produce all-empty frames.
+    jma_zoom: int = 8
     # Master toggle for the JMA forecast-leg NowcastContribution.  When
     # ``jma_enabled`` is True but this is False, only the analysis leg
     # ships and internal optical-flow extrapolation handles Japan's
