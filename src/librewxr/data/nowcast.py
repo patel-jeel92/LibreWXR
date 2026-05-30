@@ -426,16 +426,11 @@ class NowcastGenerator:
         # Run S-PROG per region.  Each call produces (n_steps, H, W)
         # forecast frames in mm/h.  We transpose flow from (H, W, 2)
         # to (2, H, W) to match the pysteps semilagrangian extrapolator
-        # convention.  After every region we aggressively release FFT
-        # plan caches + force malloc to return pages to the OS — the
-        # cumulative weight of pyfftw plans across 10+ region sizes can
-        # exceed multiple GB without this, eventually OOM-killing the
-        # pipeline mid-cycle.
+        # convention.
         per_region_forecasts: dict[str, np.ndarray] = {}
         for region_name, flow in flows.items():
             precip = precip_stacks[region_name]
             velocity = flow.transpose(2, 0, 1).astype(np.float32, copy=False)
-            forecast_mmh = None
             try:
                 forecast_mmh = sprog.forecast(
                     precip=precip,
@@ -451,15 +446,8 @@ class NowcastGenerator:
                 logger.exception(
                     "S-PROG forecast failed for region %s; skipping", region_name,
                 )
-            finally:
-                # Drop the cascade input now that the forecast has been
-                # computed; the next iteration's precip_stacks entry is
-                # the only thing we still need.
-                precip_stacks.pop(region_name, None)
-                del precip, velocity
-                _release_sprog_caches()
-            if forecast_mmh is not None:
-                per_region_forecasts[region_name] = forecast_mmh
+                continue
+            per_region_forecasts[region_name] = forecast_mmh
 
         if not per_region_forecasts:
             return [], flows
@@ -487,33 +475,6 @@ class NowcastGenerator:
             len(frames), len(per_region_forecasts), elapsed,
         )
         return frames, flows
-
-
-def _release_sprog_caches() -> None:
-    """Release pyfftw plan caches + return freed pages to the OS.
-
-    pyfftw caches FFT execution plans keyed on array shape.  After
-    running S-PROG across 10+ region sizes (342×409 up to 4400×3800
-    for MRMS), the cumulative plan + workspace allocations grow into
-    multi-GB territory and eventually OOM-kill the pipeline mid-cycle.
-    Calling this after each forecast keeps cycle-to-cycle memory flat.
-    """
-    try:
-        import pyfftw
-
-        pyfftw.forget_wisdom()
-        cache = getattr(getattr(pyfftw, "interfaces", None), "cache", None)
-        if cache is not None and cache.is_enabled():
-            cache.disable()
-            cache.enable()
-    except ImportError:
-        pass
-    # gc.collect() + malloc_trim(0) releases the cascade arrays' heap
-    # pages back to the OS — without this, glibc holds them indefinitely
-    # and the next iteration's allocations stack on top.
-    from librewxr.memory import release_memory
-
-    release_memory()
 
 
 def _compute_blend_weight(step: int, interval: int, blend_mode: str) -> float:
