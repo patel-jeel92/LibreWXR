@@ -40,6 +40,7 @@ from librewxr.data.radar_cache import RadarFrameCache
 from librewxr.data.regions import REGIONS
 from librewxr.data.store import FrameStore
 from librewxr.sources import (
+    collect_nowcast_contributions,
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
     collect_satellite_contributions,
@@ -147,8 +148,19 @@ async def run_pipeline() -> None:
     nowcast_generator = None
     if settings.nowcast_enabled:
         nowcast_store = NowcastStore(cache_dir=cache_dir)
-        nowcast_generator = NowcastGenerator(store, nowcast_store, cache=tile_cache)
-        logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
+        nowcast_contribs = collect_nowcast_contributions(settings)
+        nowcast_generator = NowcastGenerator(
+            store, nowcast_store, cache=tile_cache,
+            nowcast_contributions=nowcast_contribs,
+        )
+        external_names = [c.region_name for c in nowcast_contribs]
+        if external_names:
+            logger.info(
+                "Nowcast enabled: %d frames (external sources: %s)",
+                settings.nowcast_frames, ", ".join(external_names),
+            )
+        else:
+            logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
 
     # RadarFrameCache lets the pipeline restart and re-populate its
     # FrameStore from the prior session's frames before the first fetch

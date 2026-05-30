@@ -138,6 +138,31 @@ License: permissive with attribution. BWS disclaimer explicitly permits redistri
 
 Open questions before implementation: exact palette / dBZ scale (legend needed — sample a precip frame or correspond with BWS); backfill depth (page exposes only 5 frames; older timestamps return 404); projection confirmation. Adding a new `proj="aeqd"` branch to the `RegionDef` machinery is the largest scoped change relative to the existing source pattern.
 
+### Japan — JMA Nowcast Composite
+
+**Promoted from Tier 3 on 2026-05-30.** Previously recorded as "not openly available for programmatic access" with a note that the agency was expanding open-data initiatives over time. The expansion has happened. JMA now publishes the national nowcast composite as an anonymously-accessible XYZ tile service under a CC-BY-equivalent licence.
+
+Source: `https://www.jma.go.jp/bosai/jmatile/data/nowc/` — anonymous, no auth, no WAF, S3-backed CDN (`x-amz-expiration` headers on responses confirm AWS lifecycle management).
+
+- **Manifest:** `https://www.jma.go.jp/bosai/jmatile/data/nowc/targetTimes_N1.json` — clean JSON array, 36 frames covering 3 hours at 5-minute cadence. Format: `{"basetime": "YYYYMMDDHHMMSS", "validtime": "YYYYMMDDHHMMSS", "elements": ["hrpns", "hrpns_nd"]}`. Two products per timestamp: `hrpns` (high-resolution precipitation nowcast — radar + AMeDAS rain-gauge blend) and `hrpns_nd` (variant — likely "no display" / "no data" reduced product).
+- **Tile pattern:** `https://www.jma.go.jp/bosai/jmatile/data/nowc/{basetime}/none/{validtime}/surf/{element}/{z}/{x}/{y}.png` — 200 OK, 256×256 PNG with 4-bit colormap (16-stop palette). Standard XYZ slippy tile geometry, no projection surprises.
+- **Cadence:** 5 minutes.
+- **Coverage:** All of Japan, blended composite from JMA's 20 C-band Doppler radars + AMeDAS rain-gauge network. High-quality QPE product, not a raw single-radar PPI.
+
+License: **JMA Public Data License v1.0**, explicitly compatible with Creative Commons and **explicitly permits commercial reuse** with two attribution requirements: source must be cited as "Source: Japan Meteorological Agency website (URL)", and any modifications must be flagged so the edit isn't misattributed as government output.
+
+License caveat worth flagging in `adding-a-source.md` notes: Article 17 of Japan's Meteorological Service Act restricts *"provision of meteorological services in Japan"* — i.e. a commercial Japan-domestic weather company would need a separate JMA licence on top of this. Doesn't apply to LibreWXR redistributing radar imagery globally as a tile overlay, but worth noting for any LibreWXR operator hosting a Japan-domestic weather service on top.
+
+**Coverage value:** Closes the entire East Asia gap from Taiwan northward. Currently CWA (Taiwan) is our easternmost Asian radar; Japan adds the full archipelago plus surrounding waters. Pairs naturally with the existing CWA TWCOMP region under a new `JAPAN` group, or could live in an `EAST_ASIA` group if Korea ever opens.
+
+**Implementation effort:** Probably ~1 day, comparable to MMD Malaysia.
+- Standard XYZ tile fetch with the manifest+tile pattern above.
+- 4-bit palette PNG decode — smaller palette than NEXRAD (16 stops vs 256), but uses the same `_helpers.dbz_encode` pipeline.
+- The hrpns product is **rainfall rate (mm/h), not raw dBZ**. Need to find JMA's documented mm/h-to-colour mapping (well-known in the Japanese weather community; commonly: 0.1, 1, 5, 10, 20, 30, 50, 80+ mm/h with corresponding stops) and apply Marshall-Palmer inverse for dBZ output. Same shape as the HKO note about rainfall-rate products.
+- Tile-server XYZ → equirect region sampling: the existing tile infrastructure samples a `RegionDef` grid, not XYZ tiles, so we'd either fetch the XYZ tiles at a fixed zoom (z=6 covers all of Japan in 4–6 tiles) and stitch into a region grid, or extend `RegionDef` to natively consume XYZ pyramids. The fixed-zoom-stitch approach is simpler and matches our existing pattern.
+
+Open questions before implementation: confirm the exact rainfall-rate stops by sampling a known precipitation frame against JMA's published legend (or correspond with JMA citing the public licence's reuse permission); decide on fixed zoom level vs adaptive (z=6 → ~10 km/px, z=7 → ~5 km/px — z=7 likely the right balance for Japan's small territory); group placement (`JAPAN` standalone or shared `EAST_ASIA` once Korea is a possibility).
+
 ## Radar — Tier 2
 
 Sources with viable open access but at least one outstanding blocker — either a license question pending an operator response, a technical friction that adds material engineering cost, or a deferral while higher-value Tier 1s ship first.
@@ -255,13 +280,11 @@ Partially viable but deferred. The FTP composite (IDR00004) at `ftp.bom.gov.au/a
 
 If revisited: contact BOM about data access terms; check whether `api.bom.gov.au` has a public API key programme (would still need self-hosting compatibility); study `Makin-Things/bom-radar-card`'s projection handling for the WMTS approach.
 
-### Japan — JMA
-
-Not openly available for programmatic access. Worth re-checking — JMA has been expanding open-data initiatives over time, but the current radar imagery is not on an anonymous endpoint.
-
 ### South Korea — KMA
 
-Korean-only documentation; unclear format and access. Worth re-checking if English documentation becomes available.
+API-key gated. KMA's Open MET Data Portal at `data.kma.go.kr` does offer radar data, but access requires registration and a per-developer API key. Automatic Tier 3 under the no-API-keys rule (`adding-a-source.md`). Licence itself is dual-marked KOGL (Korea Open Government License) + Creative Commons and would otherwise be fine; the credential gate is the disqualifier.
+
+Trigger to revisit: KMA publishes anonymous radar endpoints, e.g. via the AWS Open Data Sponsorship Program. They already did this for GK-2A satellite data (`noaa-gk2a-pds` bucket is anonymous), so the precedent exists within the same agency. Same trigger pattern as Indonesia BMKG.
 
 ### India — IMD
 
@@ -330,6 +353,51 @@ Trigger to revisit: BMKG adds radar to `data.bmkg.go.id` (where they already pub
 ### Iceland — Vedur.is
 
 Only pre-coloured images with map backgrounds baked in (540×383 PNG with grid lines, coastlines, legends). Not usable as a tile overlay. Same shape of blocker as Turkey but smaller.
+
+### Morocco — DMN / DGM
+
+WMO WIS2 infrastructure-provider status (one of 11 global hub nodes) is institutionally significant on paper, but doesn't translate to a public radar feed. Maroc Météo operates 7–9 weather radars (the original 7-station fleet plus 2018 additions at Tan-Tan and Erfoud, with 5 more from a 2023 Baron Weather contract expected through mid-2024). No anonymous radar endpoint has been published.
+
+- `marocmeteo.ma/fr/radar` is a Drupal route that returns 404 with no radar content — the page exists in the URL space but isn't populated for public access.
+- `data.gov.ma` (Morocco's national open-data portal) lists **0 datasets across all 8 thematic categories**, including meteorology. Effectively empty.
+- `extranet.marocmeteo.ma` returns HTTP 200 but is credential-gated.
+- Rain Viewer's Morocco page lists exactly one station (MA2755 Debdou) and returns server errors — same pattern as pre-war Ukraine, suggesting a feed that once worked and now doesn't.
+
+Same shape of blocker as Saudi NCM: engaged with WMO open-data sharing at a meta level (in Saudi's case the ArcGIS Hub, in Morocco's case the WIS2 hub provider role), but radar specifically is not on any anonymous endpoint. The WIS2 hub status is therefore a *warm institutional signal* but not an actionable trigger by itself.
+
+Coverage value if ever unblocked would be substantial — North Africa is currently a near-total radar void in our coverage map. A Moroccan composite would meaningfully fill an empty quadrant.
+
+Trigger to revisit: DMN publishes radar to `data.gov.ma` (which would also require the portal to actually have content, currently it does not), or to an anonymous AWS bucket / CDN, or via a documented free-tier API on a `data.marocmeteo.ma` subdomain. No specific signal of any of these.
+
+### Ukraine — UHMC
+
+Pre-war Ukraine had a small radar network operated by State Enterprise «UAMC» under the Ukrainian Hydrometeorological Center: Boryspil (UKBB) near Kyiv, relaunched April 2019 after years of dormancy, plus Zaporizhya (UKDE) listed historically by aggregators. Per the Ukrainian Hydrometeorological Center Wikipedia entry, *"Weather radar (operated by SE «UAMC» and relaunched in 2019, it was destroyed in 2022 during Russian invasion."* Many other surface stations were also lost or damaged.
+
+Current state (2026-05): `meteo.gov.ua` has no radar product in its public navigation, only forecasts, Meteosat-derived satellite composites, and warnings. Rain Viewer still lists UKBB+UKDE but the upstream WMS returns server errors for both — consistent with a long-term outage rather than a transient blip. Ukraine is not a EUMETNET member, so its radars were never part of the OPERA composite either. Aggregators currently displaying "Ukraine radar" (AccuWeather, Weather.com, meteoblue) are showing model-derived precipitation, not radar returns — the same approach LibreWXR uses with IFS over uncovered regions.
+
+A different shape of Tier 3 blocker from the rest of this section: not licence, not policy, not API-key — infrastructure unavailable. The same shape applies in principle to other countries with ongoing severe disruption (Gaza, Sudan, Yemen); not worth surveying proactively, the agency announcement is the trigger.
+
+Trigger to revisit: UHMC publicly announces a restored radar with a data feed. Most likely path is a post-war reconstruction project with WMO and/or EUMETNET assistance. Secondary trigger: Ukraine joins EUMETNET OPERA — `OperaSource` would pick it up automatically once a Ukrainian station appeared in the OPERA station list.
+
+### Russia — Roshydromet
+
+**Project-policy exclusion.** LibreWXR will not ingest data from Russian state meteorological agencies for as long as the Russian Federation continues its invasion of Ukraine. Technically the data is reachable; the exclusion is a values-based decision, not a technical or licensing limitation, and it would remain in effect even if Roshydromet published radar under CC-BY-4.0 tomorrow.
+
+The pairing with the Ukraine entry above is deliberate. Ukraine's radar infrastructure was destroyed by Russia, so LibreWXR neither pretends Ukraine has coverage (Tier 3 — infrastructure unavailable) nor accepts the aggressor's data as a substitute (Tier 3 — project-policy exclusion). Ingesting and redistributing data from a state agency of an aggressor government, even data as politically neutral as precipitation radar, normalises that state's institutional standing during an ongoing war of aggression. LibreWXR declines to do that.
+
+Technical context, recorded so the research isn't redone if policy ever changes:
+
+- **Operator:** Hydrometcenter of Russia, part of Roshydromet.
+- **Network:** DMRL-C (Doppler Meteorological Radar — C-band), built by LEMZ. Roughly 40 modern C-band stations across European Russia, comparable in capability to OPERA-tier members.
+- **Coverage:** European Russia only. The product page at `meteoinfo.ru/en/radanim` explicitly scopes itself "for the European part of the country." Siberia and Far East are not in the product, and DMRL-C deployment east of the Urals is sparse anyway.
+- **Endpoint:** `https://meteoinfo.ru/hmc-output/rmap/phenomena.gif` — anonymous, HTTP 200, no WAF, `Cache-Control: no-store`, \~14 MB, 1200×1200 GIF89a, animated 3-hour loop.
+- **Format:** Burned-in chrome palette GIF (legend, geography, borders). No raw dBZ. Would need palette reverse-engineering, same shape as Malaysia MMD.
+
+Secondary blockers that would also need resolving if the policy block were ever lifted: no licence grant (the page carries `© Hydrometcenter of Russia` and nothing else — worse than Hong Kong, which at least *grants* non-commercial use); and Roshydromet is not on the WMO WIS2 infrastructure-provider list, so the WIS2 path doesn't exist either.
+
+Coverage cost is acknowledged honestly: European Russia is the largest contiguous Eurasian radar void in our coverage map. OPERA's eastern edge sits at roughly the Baltic states + Belarus + Black Sea, and the gap east of that is substantial. The decision is not free of cost.
+
+No re-evaluation trigger tied to data access, licence, or WIS2 publication. The only relevant change of circumstance is the end of the war and a meaningful change in the Russian government's posture toward Ukraine.
 
 ## NWP — Implemented
 

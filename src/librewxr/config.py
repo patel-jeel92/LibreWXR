@@ -158,6 +158,33 @@ class Settings(BaseSettings):
     # data from neighbours).
     dpc_base_url: str = "https://radar-api.protezionecivile.it"
     dpc_enabled: bool = True
+    # JMA HRPN (High-Resolution Precipitation Nowcast) composite for Japan.
+    # Anonymous S3-backed CDN at ``www.jma.go.jp/bosai/jmatile/data/nowc/``,
+    # 5-min cadence, XYZ tile pyramid in JMA's standard 10-stop palette PNG
+    # encoding (4-bit palette for populated tiles, 8-bit RGBA for empty).
+    # Two contributions from one package: the analysis leg (basetime ==
+    # validtime, ingested as standard radar) and the forecast leg
+    # (validtime > basetime, ingested via NowcastContribution to replace
+    # internal optical-flow extrapolation for JPCOMP).  JMA Public Data
+    # License v1.0 — CC-BY equivalent with commercial reuse explicitly
+    # permitted, attribution required.
+    jma_base_url: str = "https://www.jma.go.jp/bosai/jmatile/data/nowc"
+    jma_enabled: bool = True
+    # Tile zoom level used for the fetch+stitch pipeline.  Defaults to 7
+    # (~2.5 km/px, ~99 tiles per frame for JPCOMP) which is 2x oversampled
+    # vs our 0.0125° internal grid.  Native HRPN is 250 m so this is still
+    # significantly undersampled, but matches the resolution of neighbouring
+    # TWCOMP coverage.  z=6 is the bandwidth-saver option (~30 tiles per
+    # frame, 5 km/px); z=8 would be gold-plated (~378 tiles per frame).
+    jma_zoom: int = 7
+    # Master toggle for the JMA forecast-leg NowcastContribution.  When
+    # ``jma_enabled`` is True but this is False, only the analysis leg
+    # ships and internal optical-flow extrapolation handles Japan's
+    # nowcast like every other region.  Default True because JMA's
+    # operational nowcast significantly outperforms generic optical-flow
+    # extrapolation in their domain (XRAIN fusion, convective cell growth
+    # modelling, continuous gauge calibration through the forecast horizon).
+    jma_nowcast_enabled: bool = True
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"

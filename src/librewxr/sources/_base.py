@@ -60,6 +60,38 @@ class NWPGrid(Protocol):
 
 
 @runtime_checkable
+class NowcastSource(Protocol):
+    """Shape every external nowcast source class must satisfy.
+
+    External nowcast sources publish forecast-leg frames for a specific
+    region — their own model-extrapolated nowcasts that we ingest
+    directly rather than computing via internal optical-flow.  Use this
+    when an upstream agency publishes a higher-quality nowcast than our
+    generic extrapolation could produce (e.g. JMA HRPN which fuses
+    XRAIN, models convective cell growth, and maintains gauge mass
+    balance through the forecast horizon).
+
+    The internal ``NowcastGenerator`` still owns:
+      - boundary feathering at the contribution's coverage edge,
+        where the external nowcast hands off to optical-flow extrapolation
+      - blend weight against the radar analysis at T=0
+      - snow-mask overlay if applicable
+
+    Each call returns a list of ``(target_time, frame_data)`` tuples
+    covering one update cycle's forecast frames (typically 5-min steps
+    out to the horizon).  Returning ``None`` signals "skip this cycle"
+    (e.g. transient upstream error); the internal extrapolation fills
+    in for that cycle.
+    """
+
+    async def fetch_forecast(
+        self, region: RegionDef
+    ) -> list[tuple[int, np.ndarray]] | None: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
 class SatelliteSource(Protocol):
     """Shape every satellite source class must satisfy.
 
@@ -128,6 +160,27 @@ class NWPContribution:
     name: str
     slug: str | None = None
     regional: bool = True
+
+
+@dataclass
+class NowcastContribution:
+    """Return value from a source package's ``nowcast_provider(settings)``.
+
+    A nowcast contribution covers exactly one region (the region where
+    the upstream agency's nowcast is valid).  The internal pipeline
+    handles boundary feathering at the region's edge, where the
+    contribution's coverage hands off to optical-flow extrapolation.
+
+    ``horizon_minutes`` is the maximum forecast horizon the contribution
+    publishes.  The internal extrapolation runs beyond that horizon if
+    needed (e.g. JMA publishes 60 min; if user requests 80 min,
+    minutes 60-80 fall back to optical-flow extrapolation seeded by
+    JMA's T+60 frame).
+    """
+
+    region_name: str
+    instance: NowcastSource
+    horizon_minutes: int = 60
 
 
 @dataclass

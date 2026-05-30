@@ -22,6 +22,7 @@ from librewxr.data.nowcast import NowcastGenerator, NowcastStore
 from librewxr.data.nwp_source import NWPChain
 from librewxr.data.store import FrameStore
 from librewxr.sources import (
+    collect_nowcast_contributions,
     collect_nwp_contributions,
     collect_radar_coverage_metadata,
     collect_satellite_contributions,
@@ -386,8 +387,19 @@ async def lifespan(app: FastAPI):
     nowcast_generator = None
     if settings.nowcast_enabled:
         nowcast_store = NowcastStore()
-        nowcast_generator = NowcastGenerator(store, nowcast_store, cache=cache)
-        logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
+        nowcast_contribs = collect_nowcast_contributions(settings)
+        nowcast_generator = NowcastGenerator(
+            store, nowcast_store, cache=cache,
+            nowcast_contributions=nowcast_contribs,
+        )
+        external_names = [c.region_name for c in nowcast_contribs]
+        if external_names:
+            logger.info(
+                "Nowcast enabled: %d frames (external sources: %s)",
+                settings.nowcast_frames, ", ".join(external_names),
+            )
+        else:
+            logger.info("Nowcast enabled: %d frames", settings.nowcast_frames)
 
     # Separate thread pools for direct requests and background warming.
     # Direct requests get their own pool so they are never queued behind

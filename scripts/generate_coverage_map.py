@@ -26,10 +26,9 @@ domain shape rather than a misleading lat/lon bounding box.
 Basemap: Natural Earth Vector 1:110m country polygons (CC0).
 
 # Regenerate with:
-#   python3 -m venv /tmp/coverage-map-venv
-#   /tmp/coverage-map-venv/bin/pip install matplotlib pyproj shapely
+#   pip install -e ".[maps]"  (one-time, installs matplotlib + pyproj into the project venv)
 #   curl -L https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson -o /tmp/ne_countries.geojson
-#   /tmp/coverage-map-venv/bin/python scripts/generate_coverage_map.py
+#   .venv/bin/python scripts/generate_coverage_map.py
 """
 from __future__ import annotations
 
@@ -84,6 +83,7 @@ def _load_data_module(path: Path):
 _SRC = REPO_ROOT / "src" / "librewxr" / "sources" / "regional"
 _marn  = _load_data_module(_SRC / "central_america/el_salvador/radar/marn/stations.py")
 _cwa   = _load_data_module(_SRC / "east_asia/taiwan/radar/cwa/stations.py")
+_jma   = _load_data_module(_SRC / "east_asia/japan/radar/jma/stations.py")
 _opera = _load_data_module(_SRC / "europe/radar/opera/stations.py")
 _dpc   = _load_data_module(_SRC / "europe/italy/radar/dpc/stations.py")
 _msc   = _load_data_module(_SRC / "north_america/canada/radar/msc_canada/stations.py")
@@ -107,6 +107,8 @@ NEXRAD_PUERTO_RICO = _usa.NEXRAD_PUERTO_RICO
 MMD_EAST_STATIONS = _mmd.EAST_STATIONS
 MMD_PENINSULAR_STATIONS = _mmd.PENINSULAR_STATIONS
 MMD_RANGES = _mmd.RANGE_OVERRIDES
+JMA_STATIONS = _jma.STATIONS
+JMA_RANGES = _jma.RANGE_OVERRIDES
 
 # Combined per-region range map for the map renderer.  Mirrors what
 # ``data.coverage`` builds at runtime — provider-supplied range overrides
@@ -117,6 +119,7 @@ REGION_RADAR_RANGE: dict[str, float] = {
     **OPERA_RANGES,
     **DPC_RANGES,
     **MMD_RANGES,
+    **JMA_RANGES,
 }
 
 
@@ -345,6 +348,13 @@ def build_radar_sources() -> list[Source]:
     # substantial W. Pacific buffer for typhoon tracking.
     for poly in union_of_radar_circles(CWA_STATIONS, range_for("TWCOMP")):
         radar.append(Source("CWA / QPESUMS (Taiwan)", "#e377c2", poly))
+
+    # JMA HRPN composite — 20 C-band Doppler radars spanning Hokkaido
+    # to the Ryukyu Islands.  Composite product (radar + AMeDAS gauge
+    # blend) is published as the JPCOMP region, with JMA's own forecast
+    # leg ingested as a NowcastContribution.
+    for poly in union_of_radar_circles(JMA_STATIONS, range_for("JPCOMP")):
+        radar.append(Source("JMA HRPN (Japan)", "#bcbd22", poly))
 
     # MET Malaysia — 12-radar S-band network split across Peninsular
     # Malaysia (7 stations) and East Malaysia / Borneo (5 stations),
@@ -712,7 +722,7 @@ if __name__ == "__main__":
         sources=build_radar_sources(),
         output_path=RADAR_OUTPUT,
         title="LibreWXR — Radar Composite Coverage",
-        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · DPC Italy · CWA / QPESUMS Taiwan · MET Malaysia",
+        subtitle="NOAA MRMS · MSC Canada · MARN/SNET · OPERA Europe · DPC Italy · CWA / QPESUMS Taiwan · JMA HRPN Japan · MET Malaysia",
         legend_title="Radar composites",
         alpha_fill=0.40,
         hatch="//",

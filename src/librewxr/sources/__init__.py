@@ -91,8 +91,8 @@ def iter_source_packages() -> Iterator[ModuleType]:
             logger.exception("Failed to import source package %s", module_info.name)
 
 
-def _collect_providers() -> tuple[list, list, list]:
-    radar, nwp, sat = [], [], []
+def _collect_providers() -> tuple[list, list, list, list]:
+    radar, nwp, sat, nowcast = [], [], [], []
     for mod in iter_source_packages():
         rp = getattr(mod, "radar_provider", None)
         if callable(rp):
@@ -103,10 +103,18 @@ def _collect_providers() -> tuple[list, list, list]:
         sp = getattr(mod, "satellite_provider", None)
         if callable(sp):
             sat.append(sp)
-    return radar, nwp, sat
+        ncp = getattr(mod, "nowcast_provider", None)
+        if callable(ncp):
+            nowcast.append(ncp)
+    return radar, nwp, sat, nowcast
 
 
-RADAR_PROVIDERS, NWP_PROVIDERS, SATELLITE_PROVIDERS = _collect_providers()
+(
+    RADAR_PROVIDERS,
+    NWP_PROVIDERS,
+    SATELLITE_PROVIDERS,
+    NOWCAST_PROVIDERS,
+) = _collect_providers()
 
 
 def collect_radar_contributions(settings) -> list:
@@ -161,6 +169,34 @@ def collect_nwp_contributions(settings, cache_dir) -> list:
             continue
         contributions.append(contribution)
     contributions.sort(key=lambda c: c.priority)
+    return contributions
+
+
+def collect_nowcast_contributions(settings) -> list:
+    """Walk active nowcast providers; return their contributions.
+
+    Returns ``[]`` when ``settings.nowcast_enabled`` is False or
+    ``settings.radar_enabled`` is False (no radar implies no analysis
+    leg to seed any external nowcast against).  Each contribution
+    pins exactly one region by ``region_name``; the consuming
+    ``NowcastGenerator`` keys its dispatch by that name and falls back
+    to internal optical-flow extrapolation for any region without a
+    contribution.
+    """
+    if not getattr(settings, "radar_enabled", True):
+        return []
+    if not getattr(settings, "nowcast_enabled", True):
+        return []
+    contributions = []
+    for provider in NOWCAST_PROVIDERS:
+        try:
+            contribution = provider(settings)
+        except Exception:
+            logger.exception("Nowcast source provider %r raised", provider)
+            continue
+        if contribution is None:
+            continue
+        contributions.append(contribution)
     return contributions
 
 

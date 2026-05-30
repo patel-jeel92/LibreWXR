@@ -252,18 +252,39 @@ class NowcastStore:
 # ---------------------------------------------------------------------------
 
 class NowcastGenerator:
-    """Generates nowcast frames from the latest radar data."""
+    """Generates nowcast frames from the latest radar data.
 
-    def __init__(self, store, nowcast_store: NowcastStore, cache=None):
+    May consult external ``NowcastContribution`` sources (region-keyed)
+    for regions where an upstream agency publishes their own forecast
+    leg directly (e.g. JMA HRPN for JPCOMP).  Where an external source
+    returns data for the expected validtime, it's used as-is.  Where it
+    doesn't (or returns ``None``), the region falls back to internal
+    optical-flow extrapolation.
+    """
+
+    def __init__(
+        self,
+        store,
+        nowcast_store: NowcastStore,
+        cache=None,
+        nowcast_contributions: list | None = None,
+    ):
         self._store = store          # FrameStore (past radar)
         self._nowcast_store = nowcast_store
         self._cache = cache          # TileCache (for invalidation)
+        self._contributions = list(nowcast_contributions or [])
+        self._by_region = {
+            c.region_name: c for c in self._contributions
+        }
 
     async def generate(self) -> None:
         """Generate nowcast frames from the two most recent radar frames.
 
         Called after each fetch cycle.  Runs the optical flow computation
-        in a thread to avoid blocking the event loop.
+        in a thread to avoid blocking the event loop.  External nowcast
+        contributions are fetched first (async) and passed into the sync
+        path; regions without a contribution fall through to optical-flow
+        extrapolation.
         """
         if not settings.nowcast_enabled:
             return
@@ -284,12 +305,40 @@ class NowcastGenerator:
         n_steps = settings.nowcast_frames
         interval = settings.fetch_interval
 
+        # Fetch external nowcast contributions in parallel.  Each call
+        # returns a list of (validtime_unix, frame_data) or None.
+        from librewxr.data.regions import REGIONS as _ALL_REGIONS
+        external_by_region: dict[str, dict[int, np.ndarray]] = {}
+        fetch_tasks = []
+        fetch_region_names = []
+        for region_name in latest_frame.regions:
+            contrib = self._by_region.get(region_name)
+            region_def = _ALL_REGIONS.get(region_name)
+            if contrib is None or region_def is None:
+                continue
+            fetch_tasks.append(contrib.instance.fetch_forecast(region_def))
+            fetch_region_names.append(region_name)
+        if fetch_tasks:
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            for region_name, result in zip(fetch_region_names, results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "External nowcast for %s raised: %s", region_name, result,
+                    )
+                    continue
+                if result is None:
+                    continue
+                external_by_region[region_name] = {
+                    ts: frame for (ts, frame) in result
+                }
+
         # Run CPU-heavy extrapolation in a thread
         nowcast_frames, flows = await asyncio.to_thread(
             self._generate_sync,
             prev_frame.regions, latest_frame.regions,
             latest_ts, n_steps, interval,
             settings.nowcast_blend_mode,
+            external_by_region,
         )
 
         # Swap into the store and invalidate old tile cache entries
@@ -315,11 +364,24 @@ class NowcastGenerator:
         n_steps: int,
         interval: int,
         blend_mode: str = "blended",
+        external_by_region: dict[str, dict[int, np.ndarray]] | None = None,
     ) -> list[NowcastFrame]:
-        """Synchronous nowcast generation (runs in a thread)."""
-        t0 = time.monotonic()
+        """Synchronous nowcast generation (runs in a thread).
 
-        # Pre-compute flow per region
+        For regions present in ``external_by_region``, the external
+        validtime → frame mapping is consulted first for each forecast
+        step; only when an external frame is missing for the target
+        validtime does the optical-flow extrapolation run.  Regions
+        not in the mapping at all run optical-flow for every step,
+        matching the pre-contribution behaviour exactly.
+        """
+        t0 = time.monotonic()
+        external_by_region = external_by_region or {}
+
+        # Pre-compute flow per region.  Regions fully served by an
+        # external contribution still get a flow computed because the
+        # extrapolation path may be needed for any step where the
+        # external source returned no frame (transient miss).
         flows: dict[str, np.ndarray] = {}
         for region_name in latest_regions:
             data0 = prev_regions.get(region_name)
@@ -358,8 +420,20 @@ class NowcastGenerator:
 
             regions: dict[str, np.ndarray] = {}
             for region_name, flow in flows.items():
-                data = latest_regions[region_name]
-                regions[region_name] = _extrapolate_forward(data, flow, step)
+                external = external_by_region.get(region_name)
+                external_frame = external.get(nowcast_ts) if external else None
+                # No per-pixel boundary feathering: the internal
+                # extrapolation seeds from the same upstream analysis
+                # as the external contribution (e.g. JMA HRPN N1 →
+                # FrameStore → both nowcast paths), so both produce
+                # zeros wherever the upstream has no coverage.  Per-
+                # step replacement is sufficient; mixing them per
+                # pixel would add noise rather than fill a real gap.
+                if external_frame is not None:
+                    regions[region_name] = external_frame
+                else:
+                    data = latest_regions[region_name]
+                    regions[region_name] = _extrapolate_forward(data, flow, step)
 
             frames.append(NowcastFrame(
                 timestamp=nowcast_ts,

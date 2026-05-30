@@ -42,6 +42,7 @@ box that would have implied coverage where none exists.
 | MARN El Salvador | S-band (1, San Andrés) | 120 km | 5 min | ~0.009° (~1 km) |
 | CWA Taiwan QPESUMS | S/C-band (7) | 240 km | 10 min | ~0.0125° (~1.4 km) |
 | MET Malaysia | S-band (12, national network) | 240 km | 10 min | ~0.022° lon / 0.019° lat (~2.5 km) |
+| JMA HRPN (Japan) | C-band (20) + XRAIN X-band + AMeDAS gauges | 240 km | 5 min | ~0.0125° (~1.4 km) |
 
 MRMS and MSC ingest each other's stations along the US/Canada border,
 so the cross-border zone has overlap rather than a hard seam.
@@ -53,6 +54,19 @@ Malta) — wide-beam, low-SNR, clutter-prone. The DPC Italian composite
 runs alongside OPERA in the `EUROPE` group with finer `pixel_size`, so
 the multi-region compositor lays ITCOMP down first wherever it covers
 and OPERA fills the rest of Europe.
+
+Japan's `JPCOMP` region is unique in the radar fleet because JMA
+publishes both an analysis leg (radar+gauge composite QPE, ingested as
+a standard `RadarSourceContribution`) and a forecast leg (their own
+60-minute precipitation nowcast extrapolation, ingested as a
+`NowcastContribution`).  Where LibreWXR's internal optical-flow
+extrapolation handles forward prediction for every other region,
+Japan's forecast leg comes directly from JMA — significantly more
+accurate inside their coverage because their model fuses XRAIN
+high-resolution X-band data, tracks convective cell growth/decay
+explicitly, and maintains gauge mass balance through the forecast
+horizon.  Regions without an external `NowcastContribution` continue
+to use the internal optical-flow path as before.
 
 ---
 
