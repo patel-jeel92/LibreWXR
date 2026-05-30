@@ -114,18 +114,6 @@ class FrameStore:
         async with self._lock:
             return self._frames[-1] if self._frames else None
 
-    async def get_last_n_frames(self, n: int) -> list[RadarFrame]:
-        """Return up to ``n`` most-recent frames in chronological order.
-
-        Returns fewer than ``n`` if the store hasn't filled yet (fresh
-        boot or post-gap recovery).  Used by the S-PROG nowcast, which
-        needs ``ar_order + 1`` consecutive frames per region as input.
-        """
-        if n <= 0:
-            return []
-        async with self._lock:
-            return list(self._frames[-n:])
-
     async def get_timestamps(self) -> list[int]:
         async with self._lock:
             return [f.timestamp for f in self._frames]

@@ -29,23 +29,8 @@ import cv2
 import numpy as np
 
 from librewxr.config import settings
-from librewxr.data.zr import mmh_to_uint8, uint8_to_mmh
 
 logger = logging.getLogger(__name__)
-
-# S-PROG cascade levels.  Default 6 covers ~2 km – 512 km scales on
-# our typical regional grids, matching the pysteps default.
-_SPROG_CASCADE_LEVELS = 6
-
-# pyfftw is recommended but optional — pysteps falls back to numpy FFT
-# (~2-3× slower) when the import fails.  We pick once at module load
-# and pass the chosen backend to every sprog.forecast call.
-try:
-    import pyfftw  # noqa: F401
-
-    _SPROG_FFT_METHOD = "pyfftw"
-except ImportError:
-    _SPROG_FFT_METHOD = "numpy"
 
 # Target longest dimension for optical flow computation.
 # Larger grids are downscaled to this for speed, then flow vectors are
@@ -275,45 +260,37 @@ class NowcastGenerator:
         self._cache = cache          # TileCache (for invalidation)
 
     async def generate(self) -> None:
-        """Generate nowcast frames from the most recent radar frames.
+        """Generate nowcast frames from the two most recent radar frames.
 
-        Called after each fetch cycle.  Runs the CPU-heavy work in a
-        thread to avoid blocking the event loop.  ``settings.nowcast_method``
-        selects between the legacy ``"extrapolation"`` path (2-frame
-        Farneback + cv2.remap warp) and ``"sprog"`` (3-frame pysteps
-        S-PROG spectral cascade).
+        Called after each fetch cycle.  Runs the optical flow computation
+        in a thread to avoid blocking the event loop.
         """
         if not settings.nowcast_enabled:
             return
 
-        method = settings.nowcast_method
-        n_history = 3 if method == "sprog" else 2
-
-        history = await self._store.get_last_n_frames(n_history)
-        if len(history) < n_history:
-            logger.debug(
-                "Nowcast (%s): need %d frames, have %d",
-                method, n_history, len(history),
-            )
+        timestamps = await self._store.get_timestamps()
+        if len(timestamps) < 2:
+            logger.debug("Nowcast: need at least 2 frames, have %d", len(timestamps))
             return
 
-        latest_ts = history[-1].timestamp
+        latest_ts = timestamps[-1]
+        prev_ts = timestamps[-2]
+
+        latest_frame = await self._store.get_frame(latest_ts)
+        prev_frame = await self._store.get_frame(prev_ts)
+        if latest_frame is None or prev_frame is None:
+            return
+
         n_steps = settings.nowcast_frames
         interval = settings.fetch_interval
 
-        if method == "sprog":
-            nowcast_frames, flows = await asyncio.to_thread(
-                self._generate_sync_sprog,
-                history, latest_ts, n_steps, interval,
-                settings.nowcast_blend_mode,
-            )
-        else:
-            nowcast_frames, flows = await asyncio.to_thread(
-                self._generate_sync,
-                history[-2].regions, history[-1].regions,
-                latest_ts, n_steps, interval,
-                settings.nowcast_blend_mode,
-            )
+        # Run CPU-heavy extrapolation in a thread
+        nowcast_frames, flows = await asyncio.to_thread(
+            self._generate_sync,
+            prev_frame.regions, latest_frame.regions,
+            latest_ts, n_steps, interval,
+            settings.nowcast_blend_mode,
+        )
 
         # Swap into the store and invalidate old tile cache entries
         old_timestamps = await self._nowcast_store.replace_all(nowcast_frames)
@@ -324,8 +301,8 @@ class NowcastGenerator:
 
         if nowcast_frames:
             logger.info(
-                "Nowcast updated (%s): %d frames (T+%d to T+%d min)",
-                method, len(nowcast_frames),
+                "Nowcast updated: %d frames (T+%d to T+%d min)",
+                len(nowcast_frames),
                 interval // 60,
                 n_steps * interval // 60,
             )
@@ -339,7 +316,7 @@ class NowcastGenerator:
         interval: int,
         blend_mode: str = "blended",
     ) -> list[NowcastFrame]:
-        """Synchronous extrapolation-path nowcast (runs in a thread)."""
+        """Synchronous nowcast generation (runs in a thread)."""
         t0 = time.monotonic()
 
         # Pre-compute flow per region
@@ -358,7 +335,26 @@ class NowcastGenerator:
         frames: list[NowcastFrame] = []
         for step in range(1, n_steps + 1):
             nowcast_ts = latest_ts + step * interval
-            blend_weight = _compute_blend_weight(step, interval, blend_mode)
+            # Blend weight controls how much radar extrapolation vs IFS
+            # forecast is used.  1.0 = pure radar, 0.0 = pure IFS.
+            # Beyond 60 min, always fall back to pure IFS regardless of
+            # mode because radar extrapolation becomes too inaccurate.
+            max_blend_steps = max(1, 3600 // interval)  # 6 at 10-min cadence
+            if step > max_blend_steps:
+                blend_weight = 0.0
+            elif blend_mode == "radar":
+                blend_weight = 1.0
+            elif blend_mode == "model":
+                blend_weight = 0.0
+            else:  # "blended" (default)
+                # Tuned for HRRR's native-resolution, dBZ-matched output.
+                # Starts at ~82% radar at T+10 for a smooth transition off
+                # the live frame, crosses to model-dominant by T+40, lands
+                # at 80% HRRR by T+60.  When the chain falls back to IFS
+                # (outside HRRR's CONUS domain) the same curve still
+                # applies — radar dominance early, model dominance late.
+                t = step / max_blend_steps
+                blend_weight = 0.20 + 0.80 * (1.0 - t) ** 1.4
 
             regions: dict[str, np.ndarray] = {}
             for region_name, flow in flows.items():
@@ -373,136 +369,10 @@ class NowcastGenerator:
 
         elapsed = time.monotonic() - t0
         logger.info(
-            "Nowcast generation (extrapolation): %d frames × %d regions (%.1fs)",
+            "Nowcast generation: %d frames × %d regions (%.1fs)",
             len(frames), len(flows), elapsed,
         )
         return frames, flows
-
-    @staticmethod
-    def _generate_sync_sprog(
-        history: list,
-        latest_ts: int,
-        n_steps: int,
-        interval: int,
-        blend_mode: str = "blended",
-    ) -> tuple[list[NowcastFrame], dict[str, np.ndarray]]:
-        """Synchronous S-PROG nowcast (runs in a thread).
-
-        ``history`` is a list of three ``RadarFrame`` objects in
-        chronological order.  Each region present in all three frames
-        gets a forecast; regions missing from any frame are skipped.
-        """
-        from pysteps.nowcasts import sprog
-
-        t0 = time.monotonic()
-
-        prev2_regions = history[0].regions
-        prev_regions = history[1].regions
-        latest_regions = history[2].regions
-
-        # Pre-compute flow per region (same Farneback as the
-        # extrapolation path — pysteps accepts any velocity field, no
-        # benefit to swapping motion estimation here).
-        flows: dict[str, np.ndarray] = {}
-        precip_stacks: dict[str, np.ndarray] = {}
-        for region_name, latest_data in latest_regions.items():
-            data0 = prev2_regions.get(region_name)
-            data1 = prev_regions.get(region_name)
-            if data0 is None or data1 is None:
-                continue
-            flows[region_name] = _compute_flow(data1, latest_data)
-            # Stack as (ar_order+1, H, W) in mm/h for S-PROG.  uint8 0
-            # (NODATA) maps to 0 mm/h, which S-PROG treats as no-rain
-            # via the precip_thr parameter below.
-            precip_stacks[region_name] = np.stack([
-                uint8_to_mmh(data0),
-                uint8_to_mmh(data1),
-                uint8_to_mmh(latest_data),
-            ])
-
-        if not flows:
-            return [], {}
-
-        # Run S-PROG per region.  Each call produces (n_steps, H, W)
-        # forecast frames in mm/h.  We transpose flow from (H, W, 2)
-        # to (2, H, W) to match the pysteps semilagrangian extrapolator
-        # convention.
-        per_region_forecasts: dict[str, np.ndarray] = {}
-        for region_name, flow in flows.items():
-            precip = precip_stacks[region_name]
-            velocity = flow.transpose(2, 0, 1).astype(np.float32, copy=False)
-            try:
-                forecast_mmh = sprog.forecast(
-                    precip=precip,
-                    velocity=velocity,
-                    timesteps=n_steps,
-                    n_cascade_levels=_SPROG_CASCADE_LEVELS,
-                    ar_order=2,
-                    precip_thr=0.1,
-                    probmatching_method="cdf",
-                    fft_method=_SPROG_FFT_METHOD,
-                )
-            except Exception:
-                logger.exception(
-                    "S-PROG forecast failed for region %s; skipping", region_name,
-                )
-                continue
-            per_region_forecasts[region_name] = forecast_mmh
-
-        if not per_region_forecasts:
-            return [], flows
-
-        # Assemble NowcastFrames step-by-step in chronological order.
-        frames: list[NowcastFrame] = []
-        for step in range(1, n_steps + 1):
-            nowcast_ts = latest_ts + step * interval
-            blend_weight = _compute_blend_weight(step, interval, blend_mode)
-
-            regions: dict[str, np.ndarray] = {}
-            for region_name, forecast in per_region_forecasts.items():
-                # S-PROG returns the step-1 forecast at index 0.
-                regions[region_name] = mmh_to_uint8(forecast[step - 1])
-
-            frames.append(NowcastFrame(
-                timestamp=nowcast_ts,
-                regions=regions,
-                blend_weight=blend_weight,
-            ))
-
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "Nowcast generation (sprog): %d frames × %d regions (%.1fs)",
-            len(frames), len(per_region_forecasts), elapsed,
-        )
-        return frames, flows
-
-
-def _compute_blend_weight(step: int, interval: int, blend_mode: str) -> float:
-    """Temporal blend weight between radar nowcast and NWP forecast.
-
-    1.0 = pure radar, 0.0 = pure NWP.  Beyond the 60-min radar-skill
-    window, always falls back to pure NWP regardless of mode.
-    """
-    max_blend_steps = max(1, 3600 // interval)  # 6 at 10-min cadence
-    if step > max_blend_steps:
-        return 0.0
-    if blend_mode == "radar":
-        return 1.0
-    if blend_mode == "model":
-        return 0.0
-    # "blended" (default).  Tuned for HRRR's native-resolution,
-    # dBZ-matched output.  Starts at ~82% radar at T+10 for a smooth
-    # transition off the live frame, crosses to model-dominant by T+40,
-    # lands at 20% radar by T+60.  When the chain falls back to IFS
-    # (outside HRRR's CONUS domain) the same curve still applies.
-    #
-    # Note: this curve is tuned for the legacy extrapolation path, where
-    # high-frequency convective detail persists at full intensity all
-    # the way to T+60.  S-PROG decays fine-scale features naturally via
-    # the per-scale AR(2) process, so a future Phase 4 will revisit
-    # this curve once S-PROG is live and verified.
-    t = step / max_blend_steps
-    return 0.20 + 0.80 * (1.0 - t) ** 1.4
 
 
 # ---------------------------------------------------------------------------

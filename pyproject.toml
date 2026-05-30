@@ -43,13 +43,6 @@ dependencies = [
     # LZW decode; ``tifffile`` is the pure-Python COG reader on top.
     "tifffile>=2024.0",
     "imagecodecs>=2024.0",
-    # pysteps powers the S-PROG radar nowcast (spectral decomposition +
-    # AR(2) per scale).  Replaces the cv2.remap-based extrapolation in
-    # data/nowcast.py.  pyfftw is optional but recommended — pysteps
-    # falls back to numpy FFT when missing; install the FFTW3 shared
-    # library (libfftw3-3) in the Docker image to enable it.
-    "pysteps>=1.10",
-    "pyfftw>=0.13",
 ]
 
 [project.optional-dependencies]

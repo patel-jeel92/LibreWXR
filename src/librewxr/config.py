@@ -308,17 +308,6 @@ class Settings(BaseSettings):
     nowcast_enabled: bool = True  # Generate precipitation nowcast via radar extrapolation + IFS
     nowcast_frames: int = 6  # Number of 10-min forecast frames (6 = 60 min)
     nowcast_blend_mode: str = "blended"  # "radar", "blended", or "model"
-    # Radar nowcast method.  "sprog" (default) = pysteps S-PROG
-    # (spectral prognosis): cascade decomposition + per-scale AR(2)
-    # decay, so fine convective structure decays appropriately at
-    # longer leads while large-scale features persist.  Needs 3
-    # consecutive frames per region; regions with fewer frames
-    # available this cycle silently skip nowcast generation and the
-    # renderer falls back to pure NWP for those tiles.  "extrapolation"
-    # = legacy cv2.remap warp of the latest frame along the
-    # optical-flow field, kept as a fallback during the S-PROG
-    # rollout window.
-    nowcast_method: str = "sprog"
     cache_dir: str = ""  # Persistent cache directory for fetched grids; empty = in-memory only
 
     # Multi-worker tile-server split.  When render_only is True, this

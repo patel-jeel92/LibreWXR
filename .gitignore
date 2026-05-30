@@ -7,7 +7,6 @@ build/
 
 # Virtual environment
 .venv/
-.venv-py312/
 
 # Environment (contains local config)
 .env
