@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Joshua Kimsey
 """Generate the LibreWXR coverage maps.
 
-Writes six PNGs to ``docs/``:
+Writes eight PNGs to ``docs/``:
 
   * ``coverage-map-radar.png``                  — global radar composites
   * ``coverage-map-models.png``                 — global regional NWP grids
@@ -11,6 +11,8 @@ Writes six PNGs to ``docs/``:
   * ``coverage-map-europe-models.png``          — Europe zoom (models)
   * ``coverage-map-north-america-radar.png``    — N. America zoom (radar)
   * ``coverage-map-north-america-models.png``   — N. America zoom (models)
+  * ``coverage-map-east-asia-radar.png``        — East Asia zoom (radar)
+  * ``coverage-map-east-asia-models.png``       — East Asia zoom (models)
 
 ECMWF IFS provides global coverage and is not drawn.
 
@@ -54,6 +56,8 @@ EUROPE_RADAR_OUTPUT = DOCS_DIR / "coverage-map-europe-radar.png"
 EUROPE_MODEL_OUTPUT = DOCS_DIR / "coverage-map-europe-models.png"
 NA_RADAR_OUTPUT = DOCS_DIR / "coverage-map-north-america-radar.png"
 NA_MODEL_OUTPUT = DOCS_DIR / "coverage-map-north-america-models.png"
+EAST_ASIA_RADAR_OUTPUT = DOCS_DIR / "coverage-map-east-asia-radar.png"
+EAST_ASIA_MODEL_OUTPUT = DOCS_DIR / "coverage-map-east-asia-models.png"
 BASEMAP_PATH = Path("/tmp/ne_countries.geojson")
 
 # Default radar range — matches ``librewxr.data.coverage.DEFAULT_RADAR_RANGE_KM``.
@@ -561,6 +565,14 @@ def _filter_sources_to_bounds(
     Used to keep regional legends honest — a CONUS view should advertise
     only the radars that actually fall in CONUS, not every MRMS composite
     that exists globally.
+
+    Antimeridian handling: polygons whose raw lon trace jumps across
+    ±180° (HRRR-Alaska's polar-stereographic perimeter is the canonical
+    example, spanning [-179.9°, 179.8°] in raw form) are first unwrapped
+    via the same helper the renderer uses, then tested against three
+    offset copies (-360°, 0°, +360°) so a regional window only matches
+    the copy that genuinely overlaps it.  Without this an Alaska polygon
+    falsely appears in the European legend.
     """
     xmin, xmax, ymin, ymax = bounds
     window = shapely_box(xmin, ymin, xmax, ymax)
@@ -568,13 +580,22 @@ def _filter_sources_to_bounds(
     for src in sources:
         if src.polygon.shape[0] < 3:
             continue
-        try:
-            if ShapelyPolygon(src.polygon).intersects(window):
-                out.append(src)
-        except Exception:
-            # Polygons that wrap the antimeridian etc. — never relevant
-            # for the European or North-American windows we use here.
-            pass
+        lon_unwrapped = _unwrap_longitudes(src.polygon[:, 0])
+        lat = src.polygon[:, 1]
+        matched = False
+        for offset in (-360.0, 0.0, 360.0):
+            shifted_lon = lon_unwrapped + offset
+            if shifted_lon.max() < xmin or shifted_lon.min() > xmax:
+                continue
+            try:
+                poly = ShapelyPolygon(np.column_stack([shifted_lon, lat]))
+                if poly.intersects(window):
+                    matched = True
+                    break
+            except Exception:
+                pass
+        if matched:
+            out.append(src)
     return out
 
 
@@ -807,4 +828,38 @@ if __name__ == "__main__":
         aspect=na_aspect,
         figsize=(13, 11),
         xtick_step=10, ytick_step=10,
+    )
+
+    # ── Regional zoom: East Asia ─────────────────────────────────────
+    # Window stretches from MET Malaysia's Borneo footprint up to
+    # northern Hokkaido — covers MMD Malaysia, CWA Taiwan, JMA HRPN
+    # Japan on the radar side, and the JMA MSM mesoscale grid on the
+    # model side.  Aspect at ~24°N keeps shapes roughly square at the
+    # visual mid-latitude of the window.
+    ea_bounds = (95.0, 155.0, -2.0, 50.0)
+    ea_aspect = 1.0 / cos(radians(24.0))
+    render(
+        sources=_filter_sources_to_bounds(build_radar_sources(), ea_bounds),
+        output_path=EAST_ASIA_RADAR_OUTPUT,
+        title="LibreWXR — Radar Composite Coverage (East Asia)",
+        subtitle="MET Malaysia + CWA / QPESUMS Taiwan + JMA HRPN Japan + MRMS Guam (Western Pacific)",
+        legend_title="Radar composites",
+        alpha_fill=0.40,
+        hatch="//",
+        bounds=ea_bounds,
+        aspect=ea_aspect,
+        figsize=(13, 11),
+        xtick_step=10, ytick_step=5,
+    )
+    render(
+        sources=_filter_sources_to_bounds(build_model_sources(), ea_bounds),
+        output_path=EAST_ASIA_MODEL_OUTPUT,
+        title="LibreWXR — Regional NWP Coverage (East Asia)",
+        subtitle="JMA MSM (Japan + Korean Peninsula + Taiwan + Yellow Sea); ECMWF IFS provides global coverage everywhere else",
+        legend_title="Regional NWP models",
+        alpha_fill=0.45,
+        bounds=ea_bounds,
+        aspect=ea_aspect,
+        figsize=(13, 11),
+        xtick_step=10, ytick_step=5,
     )

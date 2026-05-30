@@ -133,6 +133,21 @@ fringe:
 
 ![North America model coverage](coverage-map-north-america-models.png)
 
+### East Asia
+
+Radar — MET Malaysia (Peninsular Malaysia and East Malaysia / Borneo),
+CWA / QPESUMS Taiwan, and JMA HRPN Japan, with MRMS Guam clipping in
+from the Western Pacific:
+
+![East Asia radar coverage](coverage-map-east-asia-radar.png)
+
+Regional NWP — JMA MSM, the only regional model in the chain slot for
+this part of the world. Covers Japan + the Korean Peninsula + Taiwan +
+the Yellow Sea; ECMWF IFS provides the base layer for everything
+outside the rectangle:
+
+![East Asia model coverage](coverage-map-east-asia-models.png)
+
 ---
 
 ## Regenerating the maps
