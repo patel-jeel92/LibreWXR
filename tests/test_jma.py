@@ -10,11 +10,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from librewxr.sources._base import NowcastContribution, NowcastSource, RadarSourceContribution
-from librewxr.sources.regional.east_asia.japan.radar.jma import (
-    nowcast_provider,
-    radar_provider,
-)
+from librewxr.sources._base import RadarSourceContribution
+from librewxr.sources.regional.east_asia.japan.radar.jma import radar_provider
 from librewxr.sources.regional.east_asia.japan.radar.jma.decoder import (
     _DBZ_BY_INDEX,
     compute_tile_range,
@@ -29,7 +26,6 @@ from librewxr.sources.regional.east_asia.japan.radar.jma.regions import JPCOMP
 from librewxr.sources.regional.east_asia.japan.radar.jma.source import (
     JMAAnalysisSource,
     JMAFetcher,
-    JMANowcastSource,
     _parse_jma_ts,
 )
 
@@ -249,42 +245,12 @@ class TestProviderShape:
             jma_enabled = False
         assert radar_provider(_S()) is None
 
-    def test_nowcast_provider_returns_contribution_when_enabled(self):
-        class _S:
-            jma_enabled = True
-            jma_nowcast_enabled = True
-            jma_base_url = "https://example.invalid/nowc"
-            jma_zoom = 7
-        c = nowcast_provider(_S())
-        assert isinstance(c, NowcastContribution)
-        assert c.region_name == "JPCOMP"
-        assert c.horizon_minutes == 60
-        assert isinstance(c.instance, NowcastSource)
-
-    def test_nowcast_provider_returns_none_when_nowcast_disabled(self):
-        class _S:
-            jma_enabled = True
-            jma_nowcast_enabled = False
-        assert nowcast_provider(_S()) is None
-
-    def test_nowcast_provider_returns_none_when_jma_disabled(self):
-        class _S:
-            jma_enabled = False
-            jma_nowcast_enabled = True
-        assert nowcast_provider(_S()) is None
-
 
 class TestSourceClasses:
     def test_analysis_source_implements_radarsource_shape(self):
-        f = JMAFetcher("https://example.invalid/nowc", 7)
+        f = JMAFetcher("https://example.invalid/nowc", 6)
         s = JMAAnalysisSource(f)
         # Duck-type check: fetch_frame, fetch_archive_frame, close all exist.
         assert callable(s.fetch_frame)
         assert callable(s.fetch_archive_frame)
-        assert callable(s.close)
-
-    def test_nowcast_source_implements_nowcastsource_shape(self):
-        f = JMAFetcher("https://example.invalid/nowc", 7)
-        s = JMANowcastSource(f)
-        assert callable(s.fetch_forecast)
         assert callable(s.close)

@@ -55,18 +55,14 @@ runs alongside OPERA in the `EUROPE` group with finer `pixel_size`, so
 the multi-region compositor lays ITCOMP down first wherever it covers
 and OPERA fills the rest of Europe.
 
-Japan's `JPCOMP` region is unique in the radar fleet because JMA
-publishes both an analysis leg (radar+gauge composite QPE, ingested as
-a standard `RadarSourceContribution`) and a forecast leg (their own
-60-minute precipitation nowcast extrapolation, ingested as a
-`NowcastContribution`).  Where LibreWXR's internal optical-flow
-extrapolation handles forward prediction for every other region,
-Japan's forecast leg comes directly from JMA — significantly more
-accurate inside their coverage because their model fuses XRAIN
-high-resolution X-band data, tracks convective cell growth/decay
-explicitly, and maintains gauge mass balance through the forecast
-horizon.  Regions without an external `NowcastContribution` continue
-to use the internal optical-flow path as before.
+Japan's `JPCOMP` is a national QPE composite from JMA's HRPN product
+(20 C-band Doppler radars fused with the AMeDAS gauge network).
+Analysis-leg only — JMA also publishes a 60-minute forecast leg but
+we don't currently ingest it; JPCOMP nowcast frames come from
+LibreWXR's internal optical-flow extrapolation like every other
+region.  A future Japanese mesoscale NWP source (e.g. MSM, when /
+if openly accessible) would be the more natural pairing for
+JPCOMP-specific forecast quality.
 
 ---
 

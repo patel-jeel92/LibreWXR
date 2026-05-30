@@ -138,30 +138,21 @@ License: permissive with attribution. BWS disclaimer explicitly permits redistri
 
 Open questions before implementation: exact palette / dBZ scale (legend needed — sample a precip frame or correspond with BWS); backfill depth (page exposes only 5 frames; older timestamps return 404); projection confirmation. Adding a new `proj="aeqd"` branch to the `RegionDef` machinery is the largest scoped change relative to the existing source pattern.
 
-### Japan — JMA Nowcast Composite
+### Japan — JMA HRPN Composite (JPCOMP)
 
-**Promoted from Tier 3 on 2026-05-30.** Previously recorded as "not openly available for programmatic access" with a note that the agency was expanding open-data initiatives over time. The expansion has happened. JMA now publishes the national nowcast composite as an anonymously-accessible XYZ tile service under a CC-BY-equivalent licence.
+**Shipped 2026-05-30** (commit `dfb97c4`, refined in follow-ups).  Analysis-leg only: the N1 manifest (basetime == validtime) feeds a standard `RadarSourceContribution` for the new `JPCOMP` region under the `JAPAN` group.  Forward prediction comes from LibreWXR's internal optical-flow extrapolation like every other region.
 
-Source: `https://www.jma.go.jp/bosai/jmatile/data/nowc/` — anonymous, no auth, no WAF, S3-backed CDN (`x-amz-expiration` headers on responses confirm AWS lifecycle management).
+Source: `https://www.jma.go.jp/bosai/jmatile/data/nowc/` — anonymous, no auth, no WAF, S3-backed CDN.
 
-- **Manifest:** `https://www.jma.go.jp/bosai/jmatile/data/nowc/targetTimes_N1.json` — clean JSON array, 36 frames covering 3 hours at 5-minute cadence. Format: `{"basetime": "YYYYMMDDHHMMSS", "validtime": "YYYYMMDDHHMMSS", "elements": ["hrpns", "hrpns_nd"]}`. Two products per timestamp: `hrpns` (high-resolution precipitation nowcast — radar + AMeDAS rain-gauge blend) and `hrpns_nd` (variant — likely "no display" / "no data" reduced product).
-- **Tile pattern:** `https://www.jma.go.jp/bosai/jmatile/data/nowc/{basetime}/none/{validtime}/surf/{element}/{z}/{x}/{y}.png` — 200 OK, 256×256 PNG with 4-bit colormap (16-stop palette). Standard XYZ slippy tile geometry, no projection surprises.
-- **Cadence:** 5 minutes.
-- **Coverage:** All of Japan, blended composite from JMA's 20 C-band Doppler radars + AMeDAS rain-gauge network. High-quality QPE product, not a raw single-radar PPI.
+- **Manifest:** `targetTimes_N1.json` — JSON array, 36 frames at 5-minute cadence.  Format: `{"basetime": "YYYYMMDDHHMMSS", "validtime": "YYYYMMDDHHMMSS", "elements": ["hrpns", "hrpns_nd"]}`.  We consume `hrpns` only; `hrpns_nd` returns an HTML 404 page when probed (not a real product variant despite appearing in the elements array).
+- **Tile pattern:** `…/{basetime}/none/{validtime}/surf/hrpns/{z}/{x}/{y}.png` — 256×256 4-bit palette PNG for populated tiles, 8-bit RGBA all-transparent placeholder for empty tiles.
+- **Tile pyramid quirk:** JMA serves real data only at **even zoom levels** (z=4, 6, 8, 10).  Odd zooms (5, 7, 9) return 334-byte transparent placeholders at every coord.  We fetch at z=8 (~420 tiles per frame, ~1.25 km/px), which matches the JPCOMP grid resolution.  z=6 (~30 tiles, ~5 km/px) is the bandwidth-saver fallback.
+- **Cadence:** native 5 min; we sample at LibreWXR's 10 min rhythm.
+- **Coverage:** all of Japan via 20 C-band Doppler radars fused with the AMeDAS rain-gauge network.  High-quality QPE composite, not a single-radar PPI.
 
-License: **JMA Public Data License v1.0**, explicitly compatible with Creative Commons and **explicitly permits commercial reuse** with two attribution requirements: source must be cited as "Source: Japan Meteorological Agency website (URL)", and any modifications must be flagged so the edit isn't misattributed as government output.
+License: **JMA Public Data License v1.0** — CC-BY equivalent, explicit commercial-reuse permission, attribution required ("Source: Japan Meteorological Agency website").  Article 17 of Japan's Meteorological Service Act restricts "provision of meteorological services in Japan" — does not apply to LibreWXR redistributing radar imagery globally, but worth noting for any operator running a Japan-domestic service.
 
-License caveat worth flagging in `adding-a-source.md` notes: Article 17 of Japan's Meteorological Service Act restricts *"provision of meteorological services in Japan"* — i.e. a commercial Japan-domestic weather company would need a separate JMA licence on top of this. Doesn't apply to LibreWXR redistributing radar imagery globally as a tile overlay, but worth noting for any LibreWXR operator hosting a Japan-domestic weather service on top.
-
-**Coverage value:** Closes the entire East Asia gap from Taiwan northward. Currently CWA (Taiwan) is our easternmost Asian radar; Japan adds the full archipelago plus surrounding waters. Pairs naturally with the existing CWA TWCOMP region under a new `JAPAN` group, or could live in an `EAST_ASIA` group if Korea ever opens.
-
-**Implementation effort:** Probably ~1 day, comparable to MMD Malaysia.
-- Standard XYZ tile fetch with the manifest+tile pattern above.
-- 4-bit palette PNG decode — smaller palette than NEXRAD (16 stops vs 256), but uses the same `_helpers.dbz_encode` pipeline.
-- The hrpns product is **rainfall rate (mm/h), not raw dBZ**. Need to find JMA's documented mm/h-to-colour mapping (well-known in the Japanese weather community; commonly: 0.1, 1, 5, 10, 20, 30, 50, 80+ mm/h with corresponding stops) and apply Marshall-Palmer inverse for dBZ output. Same shape as the HKO note about rainfall-rate products.
-- Tile-server XYZ → equirect region sampling: the existing tile infrastructure samples a `RegionDef` grid, not XYZ tiles, so we'd either fetch the XYZ tiles at a fixed zoom (z=6 covers all of Japan in 4–6 tiles) and stitch into a region grid, or extend `RegionDef` to natively consume XYZ pyramids. The fixed-zoom-stitch approach is simpler and matches our existing pattern.
-
-Open questions before implementation: confirm the exact rainfall-rate stops by sampling a known precipitation frame against JMA's published legend (or correspond with JMA citing the public licence's reuse permission); decide on fixed zoom level vs adaptive (z=6 → ~10 km/px, z=7 → ~5 km/px — z=7 likely the right balance for Japan's small territory); group placement (`JAPAN` standalone or shared `EAST_ASIA` once Korea is a possibility).
+**Removed forecast leg.**  An initial implementation also ingested JMA's N2 manifest (their own 60-min nowcast extrapolation) as a `NowcastContribution` that swapped in for internal optical-flow over JPCOMP.  That path was removed: JMA's 5-min validtime cadence didn't line up cleanly with our 10-min sampling rhythm, the dispatch complexity wasn't worth the win for one region, and the cleaner long-term play is a regional NWP source for Japan rather than an external nowcast.  See the "Japan — JMA LFM / MSM" entry in the NWP — Tier 3 section: those are structurally blocked (paid JMBSC contract only) so we're stuck with internal optical-flow for JPCOMP forecasts until either JMA opens an NWP feed or a third-party Japanese mesoscale model becomes anonymously available.
 
 ## Radar — Tier 2
 

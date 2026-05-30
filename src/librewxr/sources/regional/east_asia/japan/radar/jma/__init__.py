@@ -2,16 +2,15 @@
 # Copyright (C) 2026 Joshua Kimsey
 """JMA HRPN (High-Resolution Precipitation Nowcast) composite.
 
-Provides two contributions from one source package:
-
-- ``radar_provider()`` — analysis leg (N1 manifest, basetime==validtime),
-  radar + AMeDAS gauge composite QPE.  Treated as standard radar source.
-- ``nowcast_provider()`` — forecast leg (N2 manifest, validtime>basetime),
-  JMA's own model-extrapolated nowcast out to 60 minutes.  Bypasses
-  LibreWXR's internal optical-flow extrapolation for JPCOMP only.
-
-Both legs share one ``JMAFetcher`` instance internally so the manifest
-and tile caches are not duplicated.
+Analysis-leg only: ``radar_provider()`` returns the N1 manifest frames
+(basetime==validtime, radar + AMeDAS gauge composite QPE) as a standard
+``RadarSourceContribution``.  JPCOMP nowcast frames are produced by
+LibreWXR's internal optical-flow extrapolation, same as every other
+region — the JMA N2 forecast leg was tried and removed because the
+5-min validtime cadence didn't fit cleanly into the 10-min sampling
+rhythm and the dispatch complexity wasn't worth the win for one
+region.  Future re-attempt should probably treat it as a regional NWP
+overlay instead, or pair with a Japanese mesoscale NWP model.
 
 Endpoint: ``https://www.jma.go.jp/bosai/jmatile/data/nowc/`` — anonymous,
 S3-backed CDN, no auth, no WAF.
@@ -24,18 +23,16 @@ but worth noting for any operator running a Japan-domestic service.
 """
 from __future__ import annotations
 
-from librewxr.sources._base import (
-    NowcastContribution,
-    RadarSourceContribution,
-)
+from librewxr.sources._base import RadarSourceContribution
 
-from .regions import JPCOMP, REGIONS, REGION_GROUP
-from .source import JMAAnalysisSource, JMAFetcher, JMANowcastSource
-from .stations import RANGE_OVERRIDES, STATION_MAP
+from .regions import REGIONS, REGION_GROUP
+from .source import JMAAnalysisSource, JMAFetcher
+from .stations import STATION_MAP
 
 
-# Module-level singleton fetcher so analysis and nowcast contributions
-# share manifest + tile caches.  Lazily created on first provider call.
+# Module-level singleton fetcher.  Kept as a singleton in case a future
+# nowcast / forecast leg is re-added — sharing the manifest and tile
+# caches across legs avoids duplicate work.
 _shared_fetcher: JMAFetcher | None = None
 
 
@@ -48,7 +45,7 @@ def _get_or_create_fetcher(settings) -> JMAFetcher:
                 "jma_base_url",
                 "https://www.jma.go.jp/bosai/jmatile/data/nowc",
             ),
-            zoom=getattr(settings, "jma_zoom", 7),
+            zoom=getattr(settings, "jma_zoom", 8),
         )
     return _shared_fetcher
 
@@ -64,18 +61,4 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         group=REGION_GROUP,
         station_map=STATION_MAP,
         range_overrides={},
-    )
-
-
-def nowcast_provider(settings) -> NowcastContribution | None:
-    """Return the JMA forecast-leg nowcast contribution, or None if disabled."""
-    if not getattr(settings, "jma_enabled", True):
-        return None
-    if not getattr(settings, "jma_nowcast_enabled", True):
-        return None
-    fetcher = _get_or_create_fetcher(settings)
-    return NowcastContribution(
-        region_name=JPCOMP.name,
-        instance=JMANowcastSource(fetcher),
-        horizon_minutes=60,
     )

@@ -2,19 +2,16 @@
 # Copyright (C) 2026 Joshua Kimsey
 """JMA HRPN (High-Resolution Precipitation Nowcast) source classes.
 
-Three classes:
+Two classes:
 
-- ``JMAFetcher`` — shared base with httpx client, manifest cache, tile
-  cache, and concurrent tile-fetch logic.  Not a RadarSource itself.
+- ``JMAFetcher`` — httpx client + manifest cache + tile cache + bounded
+  concurrent tile-fetch logic.  Not a RadarSource itself.
 - ``JMAAnalysisSource`` — implements the RadarSource interface
   (``fetch_frame`` / ``fetch_archive_frame``) over N1 manifest frames
   (basetime == validtime, observation-derived QPE).
-- ``JMANowcastSource`` — implements the NowcastSource interface
-  (``fetch_forecast``) over N2 manifest frames (validtime > basetime,
-  JMA's own model-extrapolated nowcast to 60 minutes ahead).
 
-The two source classes share one ``JMAFetcher`` instance internally so
-the manifest and tile caches are not duplicated.
+The forecast leg over N2 frames was removed; JPCOMP nowcast uses
+LibreWXR's internal optical-flow extrapolation like every other region.
 """
 from __future__ import annotations
 
@@ -95,7 +92,13 @@ class JMAFetcher:
             await self._client.aclose()
 
     async def get_manifest(self, leg: str) -> list[dict] | None:
-        """Fetch and parse a manifest (``"N1"`` or ``"N2"``), with caching."""
+        """Fetch and parse a manifest with caching.
+
+        ``leg`` is the JMA manifest tag (``"N1"`` for analysis frames
+        where basetime==validtime; the N2 forecast leg is not currently
+        consumed but the fetcher stays generic in case it's ever
+        re-added).
+        """
         async with self._manifest_lock:
             cached = self._manifest_cache.get(leg)
             if cached is not None and time.time() - cached[0] < _MANIFEST_TTL_SEC:
@@ -251,61 +254,4 @@ class JMAAnalysisSource:
 
     async def close(self) -> None:
         # Closing is owned by the shared fetcher; nothing to do here.
-        pass
-
-
-class JMANowcastSource:
-    """Forecast-leg (N2) JMA HRPN source — implements NowcastSource.
-
-    Returns ``[(validtime_unix, frame_data), ...]`` covering the latest
-    forecast cycle (12 frames at 5-min steps from T+5 to T+60).
-    """
-
-    def __init__(self, fetcher: JMAFetcher):
-        self._fetcher = fetcher
-        # Cache the most recently fetched forecast cycle keyed by basetime.
-        self._last_basetime: str | None = None
-        self._last_frames: dict[str, list[tuple[int, np.ndarray]]] = {}
-
-    async def fetch_forecast(
-        self, region: RegionDef,
-    ) -> list[tuple[int, np.ndarray]] | None:
-        manifest = await self._fetcher.get_manifest("N2")
-        if manifest is None or not manifest:
-            return None
-
-        latest_basetime = manifest[0]["basetime"]
-
-        cached = self._last_frames.get(region.name)
-        if cached is not None and self._last_basetime == latest_basetime:
-            return cached
-
-        # Forecast frames share one basetime; iterate validtimes oldest first.
-        forecast_entries = sorted(
-            (e for e in manifest if e["basetime"] == latest_basetime),
-            key=lambda e: e["validtime"],
-        )
-
-        frames: list[tuple[int, np.ndarray]] = []
-        for entry in forecast_entries:
-            if "hrpns" not in entry.get("elements", []):
-                continue
-            decoded = await self._fetcher.fetch_region_frame(
-                entry["basetime"],
-                entry["validtime"],
-                "hrpns",
-                region,
-            )
-            frames.append((_parse_jma_ts(entry["validtime"]), decoded))
-
-        if not frames:
-            return None
-
-        if self._last_basetime != latest_basetime:
-            self._last_frames.clear()
-            self._last_basetime = latest_basetime
-        self._last_frames[region.name] = frames
-        return frames
-
-    async def close(self) -> None:
         pass

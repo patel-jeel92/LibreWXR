@@ -173,20 +173,14 @@ class Settings(BaseSettings):
     # Tile zoom level used for the fetch+stitch pipeline.  JMA's HRPN
     # pyramid only serves real PNG palette data at EVEN zoom levels
     # (z=4, 6, 8, 10); odd zooms return empty RGBA placeholder PNGs.
-    # z=8 (~1.25 km/px, ~420 tiles per frame for JPCOMP) is the best
-    # match for our 0.0125°/px (~1.4 km/px) internal grid.  z=6 is the
-    # bandwidth-saver option (~30 tiles per frame, 5 km/px) at the cost
-    # of resolution.  z=7 / z=9 must NOT be used — they look syntactically
-    # valid but produce all-empty frames.
+    # z=8 (~1.25 km/px, ~420 tiles per frame) matches the JPCOMP grid
+    # resolution (0.0125°/px ≈ 1.4 km/px) exactly.  Affordable now
+    # that the JMA N2 forecast leg is gone — analysis-only at z=8
+    # is ~420 tiles per 10-min cycle.  z=6 (~30 tiles, 5 km/px) is
+    # the bandwidth-saver fallback if cold-start is a problem.
+    # z=7 / z=9 must NOT be used — they look syntactically valid but
+    # produce all-empty frames.
     jma_zoom: int = 8
-    # Master toggle for the JMA forecast-leg NowcastContribution.  When
-    # ``jma_enabled`` is True but this is False, only the analysis leg
-    # ships and internal optical-flow extrapolation handles Japan's
-    # nowcast like every other region.  Default True because JMA's
-    # operational nowcast significantly outperforms generic optical-flow
-    # extrapolation in their domain (XRAIN fusion, convective cell growth
-    # modelling, continuous gauge calibration through the forecast horizon).
-    jma_nowcast_enabled: bool = True
     ecmwf_s3_bucket: str = "openmeteo"
     ecmwf_s3_region: str = "us-west-2"
     ecmwf_s3_prefix: str = "data_spatial/ecmwf_ifs"
