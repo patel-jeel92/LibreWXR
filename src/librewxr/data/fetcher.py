@@ -42,6 +42,17 @@ class RadarFetcher:
         "USCOMP", "CACOMP", "AKCOMP", "HICOMP", "PRCOMP", "GUCOMP"
     }
 
+    # When a region's fetch returns no data, fill the new frame from the
+    # most recent prior frame in the store rather than leaving the region
+    # absent (which causes the renderer to fall through to NWP fill, a
+    # jarring visual flicker for what's usually a transient upstream
+    # blip).  Bounded staleness: a region absent for more than this many
+    # consecutive fetch intervals drops out instead of carrying forward
+    # indefinitely.  At 10-min cadence, 2 intervals = up to 20 min of
+    # stale data — enough to bridge typical publication delays without
+    # masking a genuine multi-cycle outage.
+    _CARRY_FORWARD_MAX_INTERVALS = 2
+
     def __init__(
         self,
         store: FrameStore,
@@ -465,8 +476,13 @@ class RadarFetcher:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Group results by timestamp and build frames
-        frames_by_ts: dict[int, dict[str, np.ndarray]] = {}
+        # Group results by timestamp and build frames.  Pre-seed every
+        # ts with an empty dict so the carry-forward pass below can fire
+        # even when *every* region failed for a given timestamp — that's
+        # the case we most want to bridge with prior data.
+        frames_by_ts: dict[int, dict[str, np.ndarray]] = {
+            ts: {} for ts, _, _ in ts_and_sources
+        }
         for (ts, region, source_type), result in zip(task_meta, results):
             if isinstance(result, Exception):
                 logger.warning(
@@ -505,14 +521,53 @@ class RadarFetcher:
             if settings.despeckle_min_neighbors > 0:
                 result = _despeckle(result, settings.despeckle_min_neighbors)
 
-            if ts not in frames_by_ts:
-                frames_by_ts[ts] = {}
             frames_by_ts[ts][region.name] = result
 
-        # Store frames
+        # Store frames in chronological order so carry-forward lookback
+        # sees the freshest data (a backfill cycle that fetches several
+        # timestamps at once needs the older frames stored before the
+        # newer ones look back for missing regions).
         added = 0
         any_merged = False
-        for ts, regions_data in frames_by_ts.items():
+        enabled_names = {r.name for r in self._enabled_regions}
+        interval = settings.fetch_interval
+
+        for ts in sorted(frames_by_ts.keys()):
+            regions_data = frames_by_ts[ts]
+
+            # Carry-forward: any enabled region missing from both this
+            # cycle's fetch AND the existing store frame at ts gets
+            # filled from the most recent prior frame within
+            # _CARRY_FORWARD_MAX_INTERVALS.  The .copy() detaches from
+            # the prior frame's memmap so eviction of the source frame
+            # later can't invalidate the carried data.
+            already_have = (skip_regions or {}).get(ts, set())
+            missing = enabled_names - set(regions_data.keys()) - already_have
+            for lookback in range(1, self._CARRY_FORWARD_MAX_INTERVALS + 1):
+                if not missing:
+                    break
+                prev_ts = ts - lookback * interval
+                prev_frame = await self._store.get_frame(prev_ts)
+                if prev_frame is None:
+                    continue
+                for name in list(missing):
+                    if name in prev_frame.regions:
+                        regions_data[name] = np.asarray(
+                            prev_frame.regions[name]
+                        ).copy()
+                        stale_min = (lookback * interval) // 60
+                        logger.info(
+                            "%s: carry-forward into ts=%d from %d (%d min stale)",
+                            name, ts, prev_ts, stale_min,
+                        )
+                        missing.discard(name)
+
+            if not regions_data:
+                # Nothing to add — every enabled region was either
+                # already in the store or absent with no carry-forward
+                # source.  Skip the empty-frame write entirely.
+                continue
+
             frame = RadarFrame(timestamp=ts, regions=regions_data)
             evicted_ts, merged = await self._store.add_frame(frame)
             if evicted_ts is not None:

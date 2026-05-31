@@ -147,19 +147,40 @@ class TestTileCache:
 
 
 class _FakeSource:
-    """Returns a deterministic uint8 array sized to the region grid."""
+    """Returns a deterministic uint8 array sized to the region grid.
 
-    def __init__(self):
+    ``fill_value`` is configurable so tests can produce different data
+    on different calls (proving carry-forward really copies prior data
+    rather than fetching fresh).  Set ``next_return = None`` to
+    simulate a silent drop on the next call.
+    """
+
+    def __init__(self, fill_value: int = 50):
         self.live_calls: list[tuple[str, int]] = []
         self.archive_calls: list[tuple[str, int]] = []
+        self.fill_value = fill_value
+        self.next_return: object = ...  # ... = use default array
+
+    def _build_array(self, region):
+        return np.full(
+            (region.height, region.width), self.fill_value, dtype=np.uint8,
+        )
 
     async def fetch_frame(self, region, minutes_ago):
         self.live_calls.append((region.name, minutes_ago))
-        return np.full((region.height, region.width), 50, dtype=np.uint8)
+        if self.next_return is not ...:
+            val = self.next_return
+            self.next_return = ...
+            return val
+        return self._build_array(region)
 
     async def fetch_archive_frame(self, region, dt):
         self.archive_calls.append((region.name, int(dt.timestamp())))
-        return np.full((region.height, region.width), 50, dtype=np.uint8)
+        if self.next_return is not ...:
+            val = self.next_return
+            self.next_return = ...
+            return val
+        return self._build_array(region)
 
 
 def _build_fetcher(store, tile_cache, radar_cache, region):
@@ -330,3 +351,136 @@ class TestOnCycleCompleteHook:
         import inspect as _inspect
         sig = _inspect.signature(RadarFetcher.__init__)
         assert "on_cycle_complete" in sig.parameters
+
+
+class TestCarryForward:
+    """When a fetch returns no data for an enabled region, the fetcher
+    fills the new frame from the most recent prior frame in the store
+    (up to ``_CARRY_FORWARD_MAX_INTERVALS`` lookback).  Users see
+    continuous radar instead of intermittent NWP-fallback flicker.
+    """
+
+    @pytest.fixture
+    def small_region(self):
+        return RegionDef(
+            name="TESTREG",
+            west=0.0, east=3.2, south=0.0, north=3.2,
+            pixel_size=0.1, group="US",
+            grid_width=32, grid_height=32,
+        )
+
+    @pytest.mark.asyncio
+    async def test_silent_drop_carries_forward_from_prev_frame(
+        self, small_region,
+    ):
+        # settings.fetch_interval defaults to 600 — match that so the
+        # lookback math (ts - N*interval) lines up with our test ts.
+        from librewxr.config import settings
+        interval = settings.fetch_interval
+
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, source = _build_fetcher(store, tile_cache, None, small_region)
+
+        # First fetch lands a real frame at ts=1000.
+        source.fill_value = 77
+        await fetcher._fetch_timestamps([(1000, "live", 0)])
+        assert (await store.get_frame(1000)).regions["TESTREG"][0, 0] == 77
+
+        # Second fetch: source returns None (simulating a silent drop).
+        source.fill_value = 99  # any later real value should NOT appear
+        source.next_return = None
+        await fetcher._fetch_timestamps([(1000 + interval, "live", 10)])
+
+        # The new frame must exist AND contain the carried-forward data
+        # from ts=1000 — value 77, not the 99 default.
+        new_frame = await store.get_frame(1000 + interval)
+        assert new_frame is not None
+        assert "TESTREG" in new_frame.regions
+        assert new_frame.regions["TESTREG"][0, 0] == 77
+
+    @pytest.mark.asyncio
+    async def test_carry_forward_respects_staleness_limit(
+        self, small_region,
+    ):
+        """If the only prior frame is more than _CARRY_FORWARD_MAX_INTERVALS
+        old, no carry-forward happens — the region drops cleanly."""
+        from librewxr.config import settings
+        interval = settings.fetch_interval
+
+        store = FrameStore(max_frames=8)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, source = _build_fetcher(store, tile_cache, None, small_region)
+
+        # Anchor frame at ts=1000.
+        source.fill_value = 77
+        await fetcher._fetch_timestamps([(1000, "live", 0)])
+
+        # Silent drop 3 intervals later — past the 2-interval limit.
+        source.next_return = None
+        far_ts = 1000 + 3 * interval
+        await fetcher._fetch_timestamps([(far_ts, "live", 30)])
+
+        # The far frame should NOT contain TESTREG — the stale data is
+        # too old to carry forward.  Either the frame doesn't exist or
+        # the region key is absent.
+        far_frame = await store.get_frame(far_ts)
+        if far_frame is not None:
+            assert "TESTREG" not in far_frame.regions
+
+    @pytest.mark.asyncio
+    async def test_successful_refetch_overrides_carried_data(
+        self, small_region,
+    ):
+        """A later real fetch for the same ts replaces the carry-forward
+        copy via the FrameStore's merge-on-duplicate-ts behaviour."""
+        from librewxr.config import settings
+        interval = settings.fetch_interval
+
+        store = FrameStore(max_frames=4)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, source = _build_fetcher(store, tile_cache, None, small_region)
+
+        # Establish prev frame, then carry-forward into a dropped ts.
+        source.fill_value = 77
+        await fetcher._fetch_timestamps([(1000, "live", 0)])
+
+        source.next_return = None
+        await fetcher._fetch_timestamps([(1000 + interval, "live", 10)])
+        assert (await store.get_frame(1000 + interval)).regions["TESTREG"][0, 0] == 77
+
+        # Re-fetch the same ts with real data — should override.
+        source.fill_value = 111
+        await fetcher._fetch_timestamps([(1000 + interval, "live", 10)])
+        assert (await store.get_frame(1000 + interval)).regions["TESTREG"][0, 0] == 111
+
+    @pytest.mark.asyncio
+    async def test_carry_forward_is_independent_copy(
+        self, small_region,
+    ):
+        """The carried-forward array must be detached from the source
+        frame's memmap, so eviction of the source can't invalidate it."""
+        from librewxr.config import settings
+        interval = settings.fetch_interval
+
+        # max_frames=2 forces the original ts=1000 frame to be evicted
+        # once a third timestamp is written.
+        store = FrameStore(max_frames=2)
+        tile_cache = TileCache(max_mb=1)
+        fetcher, source = _build_fetcher(store, tile_cache, None, small_region)
+
+        source.fill_value = 77
+        await fetcher._fetch_timestamps([(1000, "live", 0)])
+
+        # Carry-forward into ts=1000+interval.
+        source.next_return = None
+        await fetcher._fetch_timestamps([(1000 + interval, "live", 10)])
+
+        # Push a third timestamp — evicts ts=1000.  The carried-forward
+        # data at ts=1000+interval should survive because it was copied,
+        # not memmap-shared.
+        source.fill_value = 200
+        await fetcher._fetch_timestamps([(1000 + 2 * interval, "live", 20)])
+
+        carried = (await store.get_frame(1000 + interval)).regions["TESTREG"]
+        assert carried[0, 0] == 77  # still readable, original value
