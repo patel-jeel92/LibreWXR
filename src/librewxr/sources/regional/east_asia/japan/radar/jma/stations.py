@@ -19,13 +19,13 @@ individual Doppler reach.  A 240 km station-circle union dramatically
 under-represents the real product footprint, so anywhere offshore
 where HRPN genuinely has data falls outside the union mask and the
 renderer's NWP-fill path paints model precipitation on top of the
-radar pixels.  The clean fix is to skip the station-circle mask
-entirely (same convention used by MRMS-style fused composites) and
-let ``data/coverage.py`` fall back to "full region bbox = covered"
-inside the JPCOMP rectangle.  See ``sample_coverage`` for the
-fallback semantics.
+radar pixels.  The clean fix is to use the authoritative coverage
+polygon JMA themselves publish — see ``JPCOMP_COVERAGE_POLYGON``.
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 
 # (latitude, longitude) — 20 JMA C-band Doppler radars.  Documentation
@@ -64,33 +64,28 @@ STATION_MAP: dict[str, list[tuple[float, float]]] = {}
 RANGE_OVERRIDES: dict[str, dict[tuple[float, float], float]] = {}
 
 
-# JPCOMP coverage polygon — vertices in (latitude, longitude) order,
-# clockwise around the perimeter starting from the northern edge.
-# Traced from JMA's own HRPN viewer at the published tile-pyramid extent
-# (the stair-stepped polygon visible at z=8 over Hokkaido → Sakishima).
-# Extends substantially further east into the Pacific than west into
-# the Sea of Japan, matching the gauge-corrected fusion's offshore
-# reach.  Stays inside the JPCOMP region rectangle (122-149°E × 22-46°N).
-JPCOMP_COVERAGE_POLYGON: list[tuple[float, float]] = [
-    (46.0, 141.5),   # N of Hokkaido NW coast
-    (46.0, 145.5),   # N of Hokkaido NE coast
-    (45.5, 148.5),   # NE corner offshore E of Hokkaido
-    (40.0, 148.0),   # E of N Honshu (Tohoku)
-    (35.0, 146.5),   # E of central Honshu
-    (30.0, 144.0),   # E of S Honshu
-    (27.0, 140.0),   # SE corner extending into Pacific
-    (25.5, 134.0),   # E of Okinawa main island
-    (24.5, 130.0),   # E of Sakishima Islands
-    (24.0, 126.0),   # S of Sakishima
-    (23.5, 122.5),   # SW corner near Yonaguni
-    (25.5, 122.0),   # W of Yonaguni
-    (28.0, 124.0),   # W of Sakishima
-    (31.5, 127.0),   # W of S Kyushu
-    (35.0, 130.0),   # W of N Kyushu
-    (38.0, 132.5),   # W of N Honshu (Sea of Japan)
-    (42.0, 135.5),   # W of Hokkaido (Sea of Japan)
-    (45.0, 138.5),   # NW of Hokkaido (Sea of Japan)
-]
+# JPCOMP coverage polygon — vertices in (latitude, longitude) order.
+# Loaded from ``jpcomp_coverage.geojson`` at import time.  That file is
+# JMA's own ``hrpns_nd`` no-data GeoJSON (inner ring, Douglas-Peucker-
+# simplified at 0.005° ≈ 500 m), discovered via the bosai/nowc viewer
+# config.  Refresh by running ``scripts/refresh_jma_coverage.py``;
+# JMA only republishes a new shape when the HRPN network itself changes.
+_COVERAGE_FILE = Path(__file__).with_name("jpcomp_coverage.geojson")
+
+
+def _load_coverage_polygon() -> list[tuple[float, float]]:
+    """Load the JPCOMP coverage polygon as (lat, lon) tuples.
+
+    GeoJSON stores coordinates as ``[lon, lat]``; the project convention
+    for polygon mask builders is ``(lat, lon)``.  The order swap happens
+    here so consumers don't have to think about it.
+    """
+    gj = json.loads(_COVERAGE_FILE.read_text())
+    ring = gj["features"][0]["geometry"]["coordinates"][0]
+    return [(float(lat), float(lon)) for lon, lat in ring]
+
+
+JPCOMP_COVERAGE_POLYGON: list[tuple[float, float]] = _load_coverage_polygon()
 
 
 COVERAGE_POLYGONS: dict[str, list[tuple[float, float]]] = {

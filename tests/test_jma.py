@@ -243,7 +243,8 @@ class TestProviderShape:
         # pyramid extent.  See stations.py module docstring.
         assert c.station_map == {}
         assert "JPCOMP" in c.coverage_polygons
-        assert len(c.coverage_polygons["JPCOMP"]) >= 8  # tilted polygon, not bbox
+        # Authoritative JMA shape simplified to ~500 verts; sanity floor at 100.
+        assert len(c.coverage_polygons["JPCOMP"]) >= 100
 
     def test_radar_provider_returns_none_when_disabled(self):
         class _S:
@@ -252,8 +253,7 @@ class TestProviderShape:
 
 
 class TestJPCOMPCoveragePolygon:
-    """Regression: JPCOMP coverage follows the real HRPN polygon, not
-    the full JPCOMP rectangle and not a 240 km station-circle union.
+    """Regression: JPCOMP coverage follows JMA's authoritative HRPN polygon.
 
     Bug history:
       - 240 km station-circle mask was way too small — large offshore
@@ -264,8 +264,11 @@ class TestJPCOMPCoveragePolygon:
         Korea, the Sea of Japan, and the Yellow Sea where HRPN has no
         data, blocking MSM from contributing anywhere in MSM's domain
         that overlaps the JPCOMP rectangle.
-      - The right answer is a polygon traced from JMA's published HRPN
-        viewer extent — a tilted parallelogram along the archipelago.
+      - 18-vertex hand-traced polygon over-claimed deep Pacific east of
+        central Honshu (extended to 146°E when real reach is ~143°E).
+      - The right answer is JMA's own ``hrpns_nd`` GeoJSON inner ring,
+        shipped as ``jpcomp_coverage.geojson`` and refreshable via
+        ``scripts/refresh_jma_coverage.py``.
     """
 
     @pytest.fixture(autouse=True)
@@ -292,16 +295,29 @@ class TestJPCOMPCoveragePolygon:
         assert "JPCOMP" in c.coverage_polygons
 
     def test_covers_offshore_pacific_east_of_japan(self):
-        """Deep Pacific offshore E of Japan is genuine HRPN territory."""
+        """Offshore Pacific east of Japan is genuine HRPN territory."""
         from librewxr.data import coverage as cov
-        # Point at ~33°N 145°E — well east of Tokyo, deep Pacific, far past
-        # any Doppler reach.  HRPN's tile pyramid covers this and the
+        # ~33°N 142°E — east of Tokyo, into the Pacific, past any single-
+        # Doppler reach but inside JMA's published HRPN extent.  The
         # renderer must trust the radar here, not bleed MSM through.
+        result = cov.sample_coverage(
+            "JPCOMP",
+            np.array([33.0]), np.array([142.0]),
+        )
+        assert bool(result[0]) is True
+
+    def test_excludes_deep_pacific_far_east(self):
+        """Deep Pacific past HRPN's published eastern edge must hand off
+        to NWP.  ~33°N 145°E sits ~200 km past the authoritative limit.
+        Locks down a regression where a hand-drawn polygon over-claimed
+        offshore reach all the way out to ~146°E.
+        """
+        from librewxr.data import coverage as cov
         result = cov.sample_coverage(
             "JPCOMP",
             np.array([33.0]), np.array([145.0]),
         )
-        assert bool(result[0]) is True
+        assert bool(result[0]) is False
 
     def test_covers_japan_landmass(self):
         """Tokyo proper must be covered (sanity check)."""
