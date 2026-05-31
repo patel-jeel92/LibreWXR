@@ -353,12 +353,19 @@ def build_radar_sources() -> list[Source]:
     for poly in union_of_radar_circles(CWA_STATIONS, range_for("TWCOMP")):
         radar.append(Source("CWA / QPESUMS (Taiwan)", "#e377c2", poly))
 
-    # JMA HRPN composite — 20 C-band Doppler radars spanning Hokkaido
-    # to the Ryukyu Islands.  Composite product (radar + AMeDAS gauge
-    # blend) is published as the JPCOMP region, with JMA's own forecast
-    # leg ingested as a NowcastContribution.
-    for poly in union_of_radar_circles(JMA_STATIONS, range_for("JPCOMP")):
-        radar.append(Source("JMA HRPN (Japan)", "#bcbd22", poly))
+    # JMA HRPN composite — gauge-corrected QPE fusing 20 C-band Doppler
+    # radars, the XRAIN X-band network, and the AMeDAS rain-gauge field
+    # into one published product whose tile pyramid extends deep into
+    # the offshore Pacific.  Renders as the full JPCOMP rectangle to
+    # match the runtime coverage contract (see
+    # ``data/coverage.py:sample_coverage`` — no station map → bbox-
+    # bounded full coverage).  Union of 240 km Doppler circles would
+    # under-represent the real footprint, same way it under-represented
+    # it at runtime before the 2026-05-30 fix.
+    radar.append(Source(
+        "JMA HRPN (Japan)", "#bcbd22",
+        latlon_box(122.0, 149.0, 22.0, 46.0),
+    ))
 
     # MET Malaysia — 12-radar S-band network split across Peninsular
     # Malaysia (7 stations) and East Malaysia / Borneo (5 stations),
