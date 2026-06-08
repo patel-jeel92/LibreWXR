@@ -651,7 +651,7 @@ Layered ahead of IFS via specificity-first dispatch (see the [Regional NWP chain
   - **AROME Nouvelle-Calédonie** (priority 28) — New Caledonia
   - **AROME Polynésie** (priority 29) — French Polynesia
 - **SMN Argentina WRF-DET** — 4 km LCC, 4 cycles/day. Anonymous AWS Open Data; covers the South American Cone.
-- **[JMA MSM](https://www.jma.go.jp/jma/en/Activities/nwp.html)** via [Open-Meteo](https://open-meteo.com/) — Japan Meteorological Agency Mesoscale Model (5 km native, Japan + Korean Peninsula + Taiwan + Yellow Sea), republished by Open-Meteo to anonymous AWS Open Data. The regional NWP overlay paired with the JPCOMP radar composite — fills the model side of the nowcast blend with a Japanese mesoscale forecast instead of falling through to global IFS.
+- **[JMA MSM](https://www.jma.go.jp/jma/en/Activities/nwp.html)** via [Open-Meteo](https://open-meteo.com/) — Japan Meteorological Agency Mesoscale Model (5 km native, Japan + Korean Peninsula + Taiwan + Yellow Sea), republished by Open-Meteo to anonymous AWS Open Data. The regional NWP overlay paired with the JPCOMP radar composite — fills the model side of the nowcast blend with a Japanese mesoscale forecast instead of falling through to global IFS. Licensed [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/); data provided by Open-Meteo.com.
 
 ### Global precipitation
 
