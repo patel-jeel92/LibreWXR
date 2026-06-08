@@ -15,7 +15,7 @@ Beyond this though, is the goal of creating a far more customizable API backend 
 ## Features
 
 - **Rain Viewer v2 API compatible** — drop-in replacement, no client changes needed
-- **All 10 color schemes** — Black & White, Rainviewer Original, Universal Blue, TITAN, TWC, Meteored, NEXRAD III, Rainbow, Dark Sky, Datameteo Valerio, plus raw grayscale
+- **All 11 color schemes** — Black & White, Rainviewer Original, Universal Blue, TITAN, TWC, Meteored, NEXRAD III, Rainbow, Dark Sky, Datameteo Valerio, Viper HD, plus raw grayscale
 - **Tile sizes** — 256px and 512px
 - **Image formats** — PNG and WebP (with configurable lossy/lossless quality)
 - **Smoothing** — zoom-adaptive Gaussian blur with seamless tile boundaries
@@ -331,6 +331,7 @@ GET /v2/radar/{timestamp}/{size}/{z}/{x}/{y}/{color}/{smooth}_{snow}.{ext}
 | 7 | Rainbow |
 | 8 | Dark Sky |
 | 9 | Datameteo Valerio |
+| 10 | Viper HD |
 | 255 | Raw (grayscale) |
 
 #### Satellite Tiles
