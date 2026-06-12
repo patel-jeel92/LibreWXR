@@ -867,7 +867,13 @@ function showFrame(position) {
         targetOpacity = RADAR_OPACITY;
     }
 
-    newLayer.on('load', function() {
+    // .once so the handler doesn't re-fire on subsequent pan/zoom tile
+    // reloads — Leaflet fires `load` every time all visible tiles for a
+    // layer finish requesting, and a cached layer still attached to the
+    // map with opacity 0 keeps requesting tiles when the viewport
+    // changes.  Without this, a paused animation would fast-forward on
+    // pan and a live one would skip frames.
+    newLayer.once('load', function() {
         newLayer.setOpacity(targetOpacity);
         if (oldLayer && oldLayer !== newLayer) {
             oldLayer.setOpacity(0);
@@ -968,7 +974,19 @@ function doPreload() {
             layer = createRadarLayer(frame, 'radar-pane');
         }
 
-        layer.on('load', function() {
+        // Use .once + an "advanced" flag so the load counter only
+        // increments once per layer.  Two problems being headed off:
+        // (1) Leaflet's `load` re-fires on pan/zoom for cached layers
+        //     still attached to the map, which without .once would push
+        //     `loaded` past `total` (visible as "Loading frames 523/6"
+        //     after a few pans).
+        // (2) `load` and `tileerror` can both fire for the same layer
+        //     when some tiles error and others succeed; the flag stops
+        //     the second one from double-counting.
+        var advanced = false;
+        layer.once('load', function() {
+            if (advanced) return;
+            advanced = true;
             if (preloadAbort) {
                 map.removeLayer(layer);
                 hidePreloadIndicator();
@@ -981,7 +999,9 @@ function doPreload() {
             loadNext(idx + 1);
         });
 
-        layer.on('tileerror', function() {
+        layer.once('tileerror', function() {
+            if (advanced) return;
+            advanced = true;
             loaded++;
             showPreloadIndicator(loaded, total);
             loadNext(idx + 1);

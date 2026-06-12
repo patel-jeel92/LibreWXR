@@ -686,6 +686,7 @@ def render(
     figsize: tuple[float, float] = (16, 9),
     xtick_step: int = 30,
     ytick_step: int = 30,
+    legend_loc: str = "lower left",
 ) -> None:
     """Render one map with the given polygon set.
 
@@ -748,7 +749,7 @@ def render(
             label=label,
         ))
     ax.legend(
-        handles=handles, loc="lower left",
+        handles=handles, loc=legend_loc,
         title=legend_title, fontsize=9, title_fontsize=10,
         framealpha=0.95,
     )
@@ -873,6 +874,11 @@ if __name__ == "__main__":
         aspect=ea_aspect,
         figsize=(13, 11),
         xtick_step=10, ytick_step=5,
+        # Lower-left would overlap MET Malaysia (Peninsular + Borneo
+        # coverage starts around 1°N 100°E).  Lower-right sits over the
+        # open W. Pacific past JMA HRPN's ~145°E reach — the small
+        # MRMS Guam disc near 13°N 144°E doesn't reach the legend area.
+        legend_loc="lower right",
     )
     render(
         sources=_filter_sources_to_bounds(build_model_sources(), ea_bounds),
@@ -885,4 +891,6 @@ if __name__ == "__main__":
         aspect=ea_aspect,
         figsize=(13, 11),
         xtick_step=10, ytick_step=5,
+        # Default lower-left sits over Indonesia/Borneo — no NWP grid
+        # claims that corner, so it works for the model map as-is.
     )
