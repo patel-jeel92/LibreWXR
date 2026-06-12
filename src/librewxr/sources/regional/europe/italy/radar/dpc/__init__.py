@@ -22,11 +22,17 @@ from librewxr.sources._base import RadarSourceContribution
 
 from .regions import ITCOMP, REGIONS
 from .source import DPCSource, _decode_vmi_dbz
-from .stations import RANGE_OVERRIDES, STATION_MAP, STATIONS
+from .stations import (
+    COVERAGE_POLYGONS,
+    RANGE_OVERRIDES,
+    STATION_MAP,
+    STATIONS,
+)
 
 REGION_GROUP = "EUROPE"
 
 __all__ = [
+    "COVERAGE_POLYGONS",
     "DPCSource",
     "ITCOMP",
     "RANGE_OVERRIDES",
@@ -56,4 +62,8 @@ def radar_provider(settings) -> RadarSourceContribution | None:
         group=REGION_GROUP,
         station_map={k: list(v) for k, v in STATION_MAP.items()},
         range_overrides=dict(RANGE_OVERRIDES),
+        coverage_polygons={
+            k: [list(ring) for ring in v]
+            for k, v in COVERAGE_POLYGONS.items()
+        },
     )

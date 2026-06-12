@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Joshua Kimsey
-"""DPC Italian national radar network — station list.
+"""DPC Italian national radar network — station list + coverage polygon.
 
 Sourced from the official DPC document
 ``LA RETE RADAR METEOROLOGICA NAZIONALE``
@@ -9,9 +9,9 @@ Tabella 1 (Gematronik Meteor 600 C and 50 DX) carry exact coordinates
 from that document.  The 13 partner radars in Tabella 2 are not given
 coordinates there; the values below come from publicly-known site
 locations (airport ICAO codes, mountain-top toponyms) and should be
-accurate to within a few hundred metres — fine for the 150 km coverage
-mask but flagged here for any future application that needs survey
-precision.
+accurate to within a few hundred metres — fine for documentation +
+coverage-polygon construction but flagged here for any future
+application that needs survey precision.
 
 The DPC platform does not (currently) expose a SITES download endpoint
 despite `findLastProductByType?type=SITES` reporting one — the
@@ -20,18 +20,31 @@ rejects it with `productType non supportato`.  Until that changes, this
 list is hand-maintained.
 
 The composite covers all of Italy from a mix of DPC + partner radars;
-unlisted partner radars only mean a slightly under-extended coverage
-mask (pixels that *are* in radar range get marked as model-fill), not
-gaps in the actual composite data.
+unlisted partner radars only mean the derived coverage polygon
+slightly under-extends in their direction (pixels that *are* in radar
+range get marked as model-fill), not gaps in the actual composite data.
 
-Range override: a uniform 150 km is applied via ``RANGE_OVERRIDES``.
-DPC's C-band radars reach further (~250 km in clear air) and the X-band
-radars only ~60 km, but the composite itself decides which radar
-contributes each pixel — our mask just needs to know "is there *some*
-nearby radar."  150 km is the C-band airport-ASR midpoint and gives a
-realistic coverage envelope.
+Why ITCOMP uses a polygon mask rather than 150 km station circles:
+A uniform 150 km circle union over-extends into W. Austria, S. Slovenia,
+and S. France where DPC has no signal but the circle says it does —
+the renderer then "claims" those pixels for ITCOMP and locks OPERA's
+real data out (see GitHub issue #5).  The polygon is built offline by
+``scripts/refresh_dpc_coverage.py`` using the rule
+
+    coverage = (D ∩ italy+30km) ∪ (D − OPERA300km)
+
+where ``D`` is the 150 km DPC station union, ``italy+30km`` is the
+Natural Earth admin-0 shape buffered by 30 km, and ``OPERA300km`` is
+the union of 300 km circles around all OPERA stations.  The polygon
+keeps DPC priority over Italy proper + a coastal buffer, lets OPERA
+take over wherever it can reach (Adriatic / Ligurian / Alpine border),
+and preserves DPC's full 150 km reach into open ocean south of Sicily
+and east of the Ionian where no OPERA neighbour fills behind.
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 
 # Tabella 1 of Allegato 1 — DPC-direct radars (lat/lon authoritative).
@@ -72,11 +85,57 @@ _DPC_PARTNERS: list[tuple[float, float]] = [
 
 STATIONS: list[tuple[float, float]] = _DPC_DIRECT + _DPC_PARTNERS
 
-STATION_MAP: dict[str, list[tuple[float, float]]] = {
-    "ITCOMP": STATIONS,
-}
 
-# Coverage-mask range per region.  See module docstring on why 150 km.
-RANGE_OVERRIDES: dict[str, float] = {
-    "ITCOMP": 150.0,
+# Empty intentionally — ITCOMP coverage comes from the polygon below,
+# not from station circles.  See module docstring.
+STATION_MAP: dict[str, list[tuple[float, float]]] = {}
+
+# Empty intentionally — no per-station range applies when no station-
+# circle mask is built in the first place.
+RANGE_OVERRIDES: dict[str, float] = {}
+
+
+# ITCOMP coverage polygon — vertices in (latitude, longitude) order.
+# Loaded from ``dpc_coverage.geojson`` at import time.  Refresh by
+# running ``scripts/refresh_dpc_coverage.py``; that script encodes the
+# build rule (D ∩ italy+30km) ∪ (D − OPERA300km), so any change to the
+# DPC or OPERA station lists, or a coastline update from Natural Earth,
+# is picked up by re-running it.
+_COVERAGE_FILE = Path(__file__).with_name("dpc_coverage.geojson")
+
+
+def _load_coverage_polygon() -> list[list[tuple[float, float]]]:
+    """Load the ITCOMP coverage shape as a list of (lat, lon) rings.
+
+    GeoJSON stores coordinates as ``[lon, lat]``; the project convention
+    for polygon mask builders is ``(lat, lon)``.  The order swap happens
+    here so consumers don't have to think about it.
+
+    Returns a multi-polygon (list of rings) even when the underlying
+    GeoJSON is a single Polygon, so downstream consumers can handle one
+    shape.
+    """
+    gj = json.loads(_COVERAGE_FILE.read_text())
+    geom = gj["features"][0]["geometry"]
+    if geom["type"] == "Polygon":
+        polys = [geom["coordinates"]]
+    elif geom["type"] == "MultiPolygon":
+        polys = geom["coordinates"]
+    else:
+        raise RuntimeError(
+            f"unexpected geometry type in {_COVERAGE_FILE.name}: {geom['type']}"
+        )
+    return [
+        [(float(lat), float(lon)) for lon, lat in poly[0]]
+        for poly in polys
+    ]
+
+
+ITCOMP_COVERAGE_POLYGON: list[list[tuple[float, float]]] = (
+    _load_coverage_polygon()
+)
+
+
+COVERAGE_POLYGONS: dict[str, list[list[tuple[float, float]]]] = {
+    "ITCOMP": ITCOMP_COVERAGE_POLYGON,
 }

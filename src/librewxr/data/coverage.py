@@ -81,14 +81,20 @@ def _build_region_mask(
 
 def _build_region_polygon_mask(
     region: RegionDef,
-    polygon: list[tuple[float, float]],
+    polygon: list[tuple[float, float]] | list[list[tuple[float, float]]],
 ) -> None:
     """Build a coverage mask by rasterising a polygon over the region grid.
 
-    ``polygon`` is a list of ``(latitude, longitude)`` vertices in order
-    around the perimeter.  Winding direction doesn't matter — ``cv2.fillPoly``
-    rasterises the interior regardless.  Vertices are converted to mask
-    grid pixel coordinates before the fill.
+    ``polygon`` is either:
+      - a single ring: ``list[(lat, lon)]`` of perimeter vertices, or
+      - a multi-polygon: ``list[list[(lat, lon)]]`` for disjoint regions
+        (e.g. Italy's mainland + Sicily + Sardinia + smaller islands, or
+        DPC's open-ocean tendrils south of Sicily where neither OPERA
+        nor any other neighbour covers).
+
+    Winding direction doesn't matter — ``cv2.fillPoly`` rasterises the
+    interior regardless.  Vertices are converted to mask grid pixel
+    coordinates before the fill.
     """
     west, east = region.west, region.east
     south, north = region.south, region.north
@@ -98,32 +104,50 @@ def _build_region_polygon_mask(
     nx = max(1, int(math.ceil((east - west) / dx)))
     ny = max(1, int(math.ceil((north - south) / dy)))
 
+    # Normalise to multi-polygon shape: list of rings.  A single-ring
+    # input is detected by inspecting the first element — a ring is a
+    # sequence of (lat, lon) pairs, so polygon[0] is a tuple/list of two
+    # floats; a multi-polygon's polygon[0] is itself a ring.
+    if polygon and isinstance(polygon[0][0], (int, float)):
+        rings = [polygon]
+    else:
+        rings = polygon
+
     # Convert (lat, lon) → (col, row) in mask pixel space.  cv2.fillPoly
-    # expects an int32 array shaped ``(1, N, 2)`` in (x, y) order.
-    pts = np.array([
-        [
-            [int(round((lon - west) / dx)),
-             int(round((lat - south) / dy))]
-            for lat, lon in polygon
-        ]
-    ], dtype=np.int32)
+    # accepts a list of int32 arrays, each shaped ``(N, 2)`` in (x, y) order.
+    pts = [
+        np.array(
+            [
+                [int(round((lon - west) / dx)),
+                 int(round((lat - south) / dy))]
+                for lat, lon in ring
+            ],
+            dtype=np.int32,
+        )
+        for ring in rings
+    ]
 
     canvas = np.zeros((ny, nx), dtype=np.uint8)
     cv2.fillPoly(canvas, pts, 255)
     mask = canvas > 0
 
     _COVERAGE_MASKS[region.name] = (mask, west, south, dx, dy)
+    total_verts = sum(len(r) for r in rings)
     logger.info(
-        "coverage mask %s: %dx%d @ %.2f° (polygon, %d vertices, %.1f%% covered)",
-        region.name, ny, nx, MASK_RESOLUTION_DEG, len(polygon),
-        100.0 * mask.mean(),
+        "coverage mask %s: %dx%d @ %.2f° (polygon, %d ring(s), "
+        "%d vertices, %.1f%% covered)",
+        region.name, ny, nx, MASK_RESOLUTION_DEG, len(rings),
+        total_verts, 100.0 * mask.mean(),
     )
 
 
 def build_coverage_masks(
     station_map: dict[str, list[tuple[float, float]]],
     range_overrides: dict[str, float] | None = None,
-    coverage_polygons: dict[str, list[tuple[float, float]]] | None = None,
+    coverage_polygons: (
+        dict[str, list[tuple[float, float]] | list[list[tuple[float, float]]]]
+        | None
+    ) = None,
 ) -> None:
     """Build coverage masks for every region with station data or a polygon.
 
@@ -149,6 +173,12 @@ def build_coverage_masks(
             pyramid traces a tilted polygon along the archipelago,
             extending well past 240 km Doppler reach into the offshore
             Pacific.  Vertices are ``(latitude, longitude)`` tuples.
+            Each region's value is either a single ring (``list[(lat,
+            lon)]``) for a connected coverage shape or a list of rings
+            (``list[list[(lat, lon)]]``) for disjoint coverage —
+            e.g. DPC Italy's mainland + Sicily + Sardinia + open-ocean
+            tendrils south of Sicily where neither OPERA nor any other
+            neighbour covers.
     """
     range_overrides = range_overrides or {}
     coverage_polygons = coverage_polygons or {}

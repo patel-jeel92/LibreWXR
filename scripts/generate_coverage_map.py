@@ -90,6 +90,7 @@ _cwa   = _load_data_module(_SRC / "east_asia/taiwan/radar/cwa/stations.py")
 _jma   = _load_data_module(_SRC / "east_asia/japan/radar/jma/stations.py")
 _opera = _load_data_module(_SRC / "europe/radar/opera/stations.py")
 _dpc   = _load_data_module(_SRC / "europe/italy/radar/dpc/stations.py")
+DPC_COVERAGE_POLYGONS = _dpc.COVERAGE_POLYGONS
 _msc   = _load_data_module(_SRC / "north_america/canada/radar/msc_canada/stations.py")
 _usa   = _load_data_module(_SRC / "north_america/usa/radar/stations.py")
 _mmd   = _load_data_module(_SRC / "southeast_asia/malaysia/radar/mmd/stations.py")
@@ -343,11 +344,20 @@ def build_radar_sources() -> list[Source]:
     for poly in union_of_radar_circles(OPERA_STATIONS, range_for("OPERA")):
         radar.append(Source("OPERA (Europe)", "#9467bd", poly))
 
-    # DPC Italy — 24 radars (11 DPC-direct + 13 partner) at 150 km
-    # each.  Fills the Italian gap that OPERA leaves (Italy is not in
-    # the EUMETNET OPERA member station list).
-    for poly in union_of_radar_circles(DPC_STATIONS, range_for("ITCOMP")):
-        radar.append(Source("DPC Italy (ITCOMP)", "#d62728", poly))
+    # DPC Italy — 24 radars (11 DPC-direct + 13 partner).  Fills the
+    # Italian gap that OPERA leaves (Italy is not in the EUMETNET OPERA
+    # member station list).  Renders as the derived polygon
+    # (``stations.py:ITCOMP_COVERAGE_POLYGON``) rather than a 150 km
+    # circle union — the polygon is clipped against OPERA's reach so the
+    # map matches the runtime claim (no Alpine over-extension into
+    # Austria, see GH #5) while preserving full 150 km open-ocean reach
+    # south of Sicily where no OPERA station can fill behind.
+    for ring in DPC_COVERAGE_POLYGONS["ITCOMP"]:
+        ring_lonlat = np.array(
+            [(lon, lat) for lat, lon in ring]
+            + [(ring[0][1], ring[0][0])]
+        )
+        radar.append(Source("DPC Italy (ITCOMP)", "#d62728", ring_lonlat))
 
     # CWA / QPESUMS Taiwan — 7 S-band radars covering Taiwan + a
     # substantial W. Pacific buffer for typhoon tracking.

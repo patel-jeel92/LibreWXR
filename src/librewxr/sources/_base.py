@@ -133,7 +133,12 @@ class RadarSourceContribution:
     here, its mask is built from the polygon and the station-circle
     path is skipped.  Vertices are (latitude, longitude) tuples in
     polygon order — winding direction doesn't matter (the fill is
-    rasterised either way).
+    rasterised either way).  Each region's value is either a single
+    ring (``list[(lat, lon)]``) or a list of disjoint rings
+    (``list[list[(lat, lon)]]``) for multi-island / open-ocean-tendril
+    shapes (DPC Italy uses the latter for mainland + Sicily + Sardinia
+    + the deep-Tyrrhenian / Ionian patches where no OPERA neighbour
+    reaches).
     """
 
     regions: list[RegionDef]
@@ -142,9 +147,9 @@ class RadarSourceContribution:
     preempts: tuple[str, ...] = ()
     station_map: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     range_overrides: dict[str, float] = field(default_factory=dict)
-    coverage_polygons: dict[str, list[tuple[float, float]]] = field(
-        default_factory=dict,
-    )
+    coverage_polygons: dict[
+        str, list[tuple[float, float]] | list[list[tuple[float, float]]],
+    ] = field(default_factory=dict)
 
 
 @dataclass

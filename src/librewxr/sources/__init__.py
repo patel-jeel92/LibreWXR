@@ -238,7 +238,7 @@ def collect_radar_coverage_metadata(
 ) -> tuple[
     dict[str, list[tuple[float, float]]],
     dict[str, float],
-    dict[str, list[tuple[float, float]]],
+    dict[str, list[tuple[float, float]] | list[list[tuple[float, float]]]],
 ]:
     """Walk active radar providers; return merged station + range + polygon maps.
 
@@ -257,7 +257,9 @@ def collect_radar_coverage_metadata(
     """
     station_map: dict[str, list[tuple[float, float]]] = {}
     range_overrides: dict[str, float] = {}
-    coverage_polygons: dict[str, list[tuple[float, float]]] = {}
+    coverage_polygons: dict[
+        str, list[tuple[float, float]] | list[list[tuple[float, float]]],
+    ] = {}
     for contribution in collect_radar_contributions(settings):
         for region_name, stations in contribution.station_map.items():
             station_map[region_name] = list(stations)
